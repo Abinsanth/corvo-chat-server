@@ -412,6 +412,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rcgen 0.14.10",
+ "rlimit",
  "rustls",
  "rustls-acme",
  "tokio",
@@ -1058,6 +1059,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rlimit"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f35ee2729c56bb610f6dba436bf78135f728b7373bdffae2ec815b2d3eb98cc3"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

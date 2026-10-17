@@ -19,6 +19,9 @@ pub const CHANNEL_BINDING_LABEL: &[u8] = b"EXPORTER-Channel-Binding";
 /// How long a connection may take to finish its TLS handshake.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long to wait after a failed `accept` (usually out of file handles) before trying again.
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
+
 /// How long a connection may wait before sending a request's headers, so an
 /// idle connection doesn't hold its socket forever.
 pub const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -36,8 +39,8 @@ pub enum Tls {
     Static(Arc<ServerConfig>),
 }
 
-/// Accepts connections forever; returns only if `accept` itself fails.
-pub async fn serve(listener: TcpListener, tls: Tls, app: Router) -> anyhow::Result<()> {
+/// Accepts connections forever. A failed `accept` is logged and retried, never returned.
+pub async fn serve(listener: TcpListener, tls: Tls, app: Router) {
     let (default, challenge) = match tls {
         Tls::Static(config) => (config, None),
         Tls::Acme { domain, cache_dir } => {
@@ -57,7 +60,15 @@ pub async fn serve(listener: TcpListener, tls: Tls, app: Router) -> anyhow::Resu
         }
     };
     loop {
-        let (tcp, _) = listener.accept().await?;
+        let tcp = match listener.accept().await {
+            Ok((tcp, _)) => tcp,
+            // Out of file handles, or a connection that died before we took it: wait a moment, keep serving.
+            Err(err) => {
+                tracing::warn!("accept: {err}");
+                tokio::time::sleep(ACCEPT_RETRY).await;
+                continue;
+            }
+        };
         let (default, challenge, app) = (default.clone(), challenge.clone(), app.clone());
         tokio::spawn(async move {
             let Ok(Some(stream)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(tcp, default, challenge)).await

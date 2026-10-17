@@ -28,5 +28,8 @@ tracing-subscriber.workspace = true
 rcgen.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+rlimit.workspace = true
+
 [lints]
 workspace = true

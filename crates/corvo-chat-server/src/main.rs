@@ -35,7 +35,8 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::fmt().with_ansi(false).with_max_level(tracing::Level::INFO).init();
             let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
             tracing::info!("corvo-chat-server {} listening on :{port} for {domain}", env!("CARGO_PKG_VERSION"));
-            serve(listener, Tls::Acme { domain, cache_dir: data_dir.join("acme") }, app()).await
+            serve(listener, Tls::Acme { domain, cache_dir: data_dir.join("acme") }, app()).await;
+            Ok(())
         }
     }
 }

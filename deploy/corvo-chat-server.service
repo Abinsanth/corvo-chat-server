@@ -10,6 +10,8 @@ ExecStart=/usr/local/bin/corvo-chat-server serve
 # Creates /var/lib/corvo-chat owned by corvo-chat: the certificate cache, later the database and server key.
 StateDirectory=corvo-chat
 StateDirectoryMode=0700
+# Each open connection holds a file handle; the default soft limit is 1024.
+LimitNOFILE=65536
 # Port 443 without running as root.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
