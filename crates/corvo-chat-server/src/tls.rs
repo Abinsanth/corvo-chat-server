@@ -5,11 +5,8 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{Router, extract::Request};
 use futures::StreamExt;
-use hyper::{body::Incoming, service::service_fn};
-use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
-    server::conn::auto,
-};
+use hyper::{body::Incoming, server::conn::http1, service::service_fn};
+use hyper_util::rt::{TokioIo, TokioTimer};
 use rustls::{ServerConfig, server::Acceptor};
 use rustls_acme::{AcmeConfig, caches::DirCache, is_tls_alpn_challenge};
 use tokio::net::{TcpListener, TcpStream};
@@ -21,6 +18,10 @@ pub const CHANNEL_BINDING_LABEL: &[u8] = b"EXPORTER-Channel-Binding";
 
 /// How long a connection may take to finish its TLS handshake.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a connection may wait before sending a request's headers, so an
+/// idle connection doesn't hold its socket forever.
+pub const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// This connection's TLS exporter value, in every request's extensions. Both
 /// ends compute the same value; a middleman has a different one on each side.
@@ -72,8 +73,12 @@ pub async fn serve(listener: TcpListener, tls: Tls, app: Router) -> anyhow::Resu
                 req.extensions_mut().insert(binding);
                 app.clone().oneshot(req)
             });
-            let _ = auto::Builder::new(TokioExecutor::new())
-                .serve_connection_with_upgrades(TokioIo::new(stream), service)
+            // The header timer also runs while a connection sits idle, before or between requests.
+            let _ = http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(HEADER_TIMEOUT)
+                .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades()
                 .await;
         });
     }

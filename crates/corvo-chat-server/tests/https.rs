@@ -123,3 +123,31 @@ async fn client_that_stalls_after_its_hello_is_closed_after_the_handshake_timeou
     });
     closed.await.expect("closed by 11 s");
 }
+
+#[tokio::test]
+async fn connection_that_sends_no_request_is_closed_after_the_header_timeout() {
+    let (addr, der) = start(app()).await;
+    let mut stream = connect(addr, der).await;
+    // Let the server finish its side of the handshake in real time; a paused clock
+    // could jump ahead of it and start its timer late.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::pause();
+    let mut buf = [0; 1];
+    assert!(timeout(Duration::from_secs(29), stream.read(&mut buf)).await.is_err(), "closed before 29 s");
+    let read = timeout(Duration::from_secs(2), stream.read(&mut buf)).await.expect("closed by 31 s");
+    assert!(read.is_err() || read.is_ok_and(|n| n == 0));
+}
+
+#[tokio::test]
+async fn connection_idle_after_a_request_is_closed_after_the_header_timeout() {
+    let (addr, der) = start(app()).await;
+    let mut stream = connect(addr, der).await;
+    stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").await.expect("the request is sent");
+    let mut buf = [0; 4096];
+    let n = stream.read(&mut buf).await.expect("the response arrives");
+    assert!(String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200"));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::pause();
+    let closed = timeout(Duration::from_secs(31), async { while stream.read(&mut buf).await.is_ok_and(|n| n > 0) {} });
+    closed.await.expect("closed by 31 s");
+}

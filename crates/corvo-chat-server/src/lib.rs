@@ -5,7 +5,7 @@ mod tls;
 
 use axum::{Router, routing::get};
 
-pub use tls::{CHANNEL_BINDING_LABEL, ChannelBinding, HANDSHAKE_TIMEOUT, Tls, serve};
+pub use tls::{CHANNEL_BINDING_LABEL, ChannelBinding, HANDSHAKE_TIMEOUT, HEADER_TIMEOUT, Tls, serve};
 
 /// Every route the server answers.
 pub fn app() -> Router {
