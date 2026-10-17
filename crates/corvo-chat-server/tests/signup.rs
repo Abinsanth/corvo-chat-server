@@ -79,11 +79,11 @@ async fn bad_names_are_refused() {
     let mut client = Client::connect(&server).await;
     client.hello().await;
     let err = begin_signup(&mut client, "1x", "Abin", device("laptop")).await.expect_err("refused");
-    assert_error(err, ErrorCode::BadUsername);
+    assert_error(*err, ErrorCode::BadUsername);
     let err = begin_signup(&mut client, "abin", "", device("laptop")).await.expect_err("refused");
-    assert_error(err, ErrorCode::BadDisplayName);
+    assert_error(*err, ErrorCode::BadDisplayName);
     let err = begin_signup(&mut client, "abin", "Abin", device("")).await.expect_err("refused");
-    assert_error(err, ErrorCode::BadDevice);
+    assert_error(*err, ErrorCode::BadDevice);
 }
 
 #[tokio::test]
@@ -225,7 +225,7 @@ async fn second_signup_from_one_device_in_a_day_is_refused() {
     let first = Person::try_sign_up(&server, "abin", device.clone()).await;
     assert!(first.is_ok());
     match Person::try_sign_up(&server, "abin", device.clone()).await {
-        Err(frame) => assert_error(frame, ErrorCode::SignupLimit),
+        Err(frame) => assert_error(*frame, ErrorCode::SignupLimit),
         Ok(_) => panic!("a second signup from one device"),
     }
     server.state.clock.advance(86_400);
@@ -240,7 +240,8 @@ async fn fourth_signup_from_one_ip_in_a_day_is_refused() {
         kept.push(Person::try_sign_up(&server, "abin", device("laptop")).await.expect("within the limit"));
     }
     match Person::try_sign_up(&server, "abin", device("laptop")).await {
-        Err(ServerFrame::Error { code: ErrorCode::SignupLimit, message, .. }) => {
+        Err(frame) => {
+            let ServerFrame::Error { code: ErrorCode::SignupLimit, message, .. } = *frame else { panic!("{frame:?}") };
             assert_eq!(message, "Too many new accounts from this network today.");
         }
         other => panic!("expected signup_limit, got {:?}", other.map(|_| ())),

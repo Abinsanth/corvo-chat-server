@@ -45,7 +45,7 @@ pub async fn begin_signup(
     base: &str,
     display_name: &str,
     device: Device,
-) -> Result<Begun, ServerFrame> {
+) -> Result<Begun, Box<ServerFrame>> {
     let password: String = format!("pw-{:016x}", rand::random::<u64>());
     let recovery: String = format!("rc-{:016x}", rand::random::<u64>());
     let (pw_state, pw_request) = register_start(&password);
@@ -61,7 +61,7 @@ pub async fn begin_signup(
         .await;
     let (username, number, pw_response, rc_response) = match client.recv().await {
         ServerFrame::SignupOffer { username, number, password, recovery } => (username, number, password, recovery),
-        other => return Err(other),
+        other => return Err(Box::new(other)),
     };
     let (pw_upload, _) = register_finish(pw_state, &password, pw_response);
     let (rc_upload, _) = register_finish(rc_state, &recovery, rc_response);
@@ -92,7 +92,11 @@ impl Person {
     }
 
     /// Like `sign_up` on a chosen device; the refusal comes back as `Err`.
-    pub async fn try_sign_up(server: &TestServer, base: &str, device: Device) -> Result<(Person, Client), ServerFrame> {
+    pub async fn try_sign_up(
+        server: &TestServer,
+        base: &str,
+        device: Device,
+    ) -> Result<(Person, Client), Box<ServerFrame>> {
         let mut client = Client::connect(server).await;
         client.hello().await;
         let begun = begin_signup(&mut client, base, "Abin", device).await?;
