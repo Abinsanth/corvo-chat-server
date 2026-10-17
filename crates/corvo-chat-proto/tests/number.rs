@@ -50,9 +50,9 @@ fn every_single_digit_error_and_adjacent_swap_is_caught() {
     for body in bodies {
         let good = Number::from_body(body).unwrap().digits().into_bytes();
         assert!(Number::parse(std::str::from_utf8(&good).unwrap()).is_ok());
-        for i in 0..10 {
+        for (i, &orig) in good.iter().enumerate() {
             for d in b'0'..=b'9' {
-                if d == good[i] {
+                if d == orig {
                     continue;
                 }
                 let mut bad = good.clone();
@@ -60,8 +60,8 @@ fn every_single_digit_error_and_adjacent_swap_is_caught() {
                 assert!(Number::parse(std::str::from_utf8(&bad).unwrap()).is_err(), "substitution in {body} at {i}");
             }
         }
-        for i in 0..9 {
-            if good[i] == good[i + 1] {
+        for (i, pair) in good.windows(2).enumerate() {
+            if pair[0] == pair[1] {
                 continue;
             }
             let mut bad = good.clone();
