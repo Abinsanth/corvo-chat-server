@@ -1,0 +1,23 @@
+# Rust build output
+/target
+**/*.rs.bk
+*.pdb
+
+# App runtime output
+*.log
+
+# Secrets and recovery files: never commit these
+.env
+.env.*
+*.pem
+*.key
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
