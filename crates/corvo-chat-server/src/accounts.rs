@@ -145,7 +145,7 @@ pub fn create_pending(
     );
     match result {
         Ok(_) => Ok(conn.last_insert_rowid()),
-        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => {
+        Err(rusqlite::Error::SqliteFailure(e, _)) if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE => {
             Err(CreateError::Taken)
         }
         Err(e) => Err(CreateError::Db(e)),
@@ -213,7 +213,7 @@ pub fn note_try(conn: &Connection, id: i64, now: i64, limits: &Limits) -> rusqli
     conn.execute(
         "UPDATE accounts SET wrong_count = wrong_count + 1,
            locked_forever = CASE WHEN wrong_count + 1 >= ?3 THEN 1 ELSE locked_forever END,
-           locked_until = CASE WHEN wrong_count + 1 >= ?2 THEN ?4 ELSE locked_until END
+           locked_until = CASE WHEN wrong_count + 1 = ?2 THEN ?4 ELSE locked_until END
          WHERE id = ?1",
         params![id, limits.wrong_before_lock, limits.wrong_before_forever, now + limits.lock_secs],
     )?;
@@ -308,6 +308,8 @@ mod tests {
         create_pending(&mut c, &new_account("abin-0000", number(100_000_001)), 0, 100).unwrap();
         let again = create_pending(&mut c, &new_account("abin-0000", number(100_000_002)), 0, 100);
         assert!(matches!(again, Err(CreateError::Taken)));
+        let same_number = create_pending(&mut c, &new_account("abin-0001", number(100_000_001)), 0, 100);
+        assert!(matches!(same_number, Err(CreateError::Taken)));
     }
 
     #[test]
@@ -346,9 +348,11 @@ mod tests {
         note_try(&c, id, now, &limits).unwrap();
         assert_eq!(state(&c, now), LockState::Until(now + 900));
         assert_eq!(state(&c, now + 900), LockState::Open);
-        for _ in 0..5 {
+        for _ in 0..4 {
             note_try(&c, id, now + 900, &limits).unwrap();
+            assert_eq!(state(&c, now + 900), LockState::Open);
         }
+        note_try(&c, id, now + 900, &limits).unwrap();
         let far = now + 10 * 365 * 86_400;
         assert_eq!(state(&c, far), LockState::Forever);
     }
