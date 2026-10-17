@@ -3,6 +3,7 @@
 #![allow(dead_code)] // each test binary uses only some of these
 
 pub mod client;
+pub mod person;
 
 use std::{net::SocketAddr, sync::Arc};
 

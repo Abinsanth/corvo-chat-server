@@ -1,10 +1,12 @@
 //! The WebSocket route: one task per connection, which starts with `hello`
 //! and then moves through the states of [`Conn`] as frames arrive.
 
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::{
+    Extension,
     extract::{
         State, WebSocketUpgrade,
         ws::{Message, WebSocket},
@@ -20,7 +22,9 @@ use tokio::{
     time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout, timeout_at},
 };
 
-use crate::{AppState, accounts, hub::Kick};
+use crate::{AppState, PeerAddr, accounts, hub::Kick};
+
+mod signup;
 
 /// The WebSocket route.
 pub const PATH: &str = "/ws";
@@ -41,8 +45,13 @@ pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// newer one holds.
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
-pub async fn upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.max_message_size(MAX_FRAME).max_frame_size(MAX_FRAME).on_upgrade(move |socket| run(socket, state))
+pub async fn upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Extension(peer): Extension<PeerAddr>,
+) -> Response {
+    let ip = peer.0.ip();
+    ws.max_message_size(MAX_FRAME).max_frame_size(MAX_FRAME).on_upgrade(move |socket| run(socket, state, ip))
 }
 
 /// Where a connection is.
@@ -50,7 +59,7 @@ pub async fn upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Res
 enum Conn {
     Anonymous,
     /// After `signup_offer`, waiting for `signup_finish`.
-    SignupOffered,
+    SignupOffered(Box<signup::Offered>),
     /// After `login_offer`, waiting for the matching finish.
     LoginOffered {
         kind: LoginKind,
@@ -112,14 +121,16 @@ struct Link {
     socket: WebSocket,
     state: AppState,
     id: u64,
+    /// Where the connection comes from, for the per-IP limits.
+    ip: IpAddr,
     conn: Conn,
     /// Set while signed in: the hub's way to stop this connection.
     kick: Option<oneshot::Receiver<Kick>>,
 }
 
-async fn run(socket: WebSocket, state: AppState) {
+async fn run(socket: WebSocket, state: AppState, ip: IpAddr) {
     let id = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
-    let mut link = Link { socket, state, id, conn: Conn::Anonymous, kick: None };
+    let mut link = Link { socket, state, id, ip, conn: Conn::Anonymous, kick: None };
     let anon_until = Instant::now() + ANON_TIMEOUT;
     if let Ok(Flow::Stay) = timeout_at(anon_until, link.hello()).await {
         link.serve(anon_until).await;
@@ -212,12 +223,28 @@ impl Link {
             Verdict::Pass => {}
             Verdict::Refuse(code) => return self.error(code, refusal(code)).await,
             Verdict::Gone => {
+                if let ClientFrame::Activate { .. } = frame {
+                    return self.expired().await;
+                }
                 self.send(&ServerFrame::SignedOut { reason: SignedOutReason::Expired }).await;
                 return Flow::Close;
             }
         }
-        // Each frame's handler goes here as signup, login and devices arrive.
-        self.error(ErrorCode::BadFrame, "not supported yet").await
+        use ClientFrame as F;
+        match frame {
+            F::SignupStart { base, display_name, device, password, recovery } => {
+                self.signup_start(base, display_name, device, password, recovery).await
+            }
+            F::SignupFinish { password, recovery, password_copy, recovery_copy, public_keys } => {
+                self.signup_finish(password, recovery, password_copy, recovery_copy, public_keys).await
+            }
+            F::Activate { code } => self.activate(code).await,
+            F::Invite { number } => self.invite(number).await,
+            F::ListInvites => self.list_invites().await,
+            F::SignOut => self.sign_out().await,
+            // The rest arrive with login, devices and recovery.
+            _ => self.error(ErrorCode::BadFrame, "not supported yet").await,
+        }
     }
 
     async fn error(&mut self, code: ErrorCode, message: &str) -> Flow {
@@ -244,7 +271,7 @@ async fn gate(conn: &Conn, state: &AppState, frame: &ClientFrame) -> Verdict {
     use ClientFrame as F;
     match conn {
         Conn::Anonymous => anonymous(frame),
-        Conn::SignupOffered => match frame {
+        Conn::SignupOffered(_) => match frame {
             F::SignupFinish { .. } => Verdict::Pass,
             _ => anonymous(frame),
         },
