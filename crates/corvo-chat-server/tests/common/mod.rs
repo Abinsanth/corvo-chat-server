@@ -5,8 +5,17 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::Router;
-use corvo_chat_server::{Tls, serve};
+use corvo_chat_proto::opaque::Suite;
+use corvo_chat_server::{
+    AppState, Tls,
+    clock::Clock,
+    db::{self, Db},
+    limits::Limits,
+    serve,
+};
+use opaque_ke::ServerSetup;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -58,4 +67,18 @@ pub async fn fetch(stream: &mut TlsStream<TcpStream>, path: &str) -> String {
     let mut response = String::new();
     stream.read_to_string(&mut response).await.expect("the response arrives");
     response
+}
+
+/// A fresh key and database in a temp dir, with a clock stopped at
+/// 1_800_000_000. Keep the `TempDir` alive as long as the state is used.
+pub fn state(limits: Limits) -> (AppState, TempDir) {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let conn = db::open(&dir.path().join(db::DB_FILE)).expect("a database");
+    let state = AppState {
+        db: Db::new(conn),
+        setup: Arc::new(ServerSetup::<Suite>::new(&mut rand_core::OsRng)),
+        clock: Clock::manual(1_800_000_000),
+        limits: Arc::new(limits),
+    };
+    (state, dir)
 }
