@@ -17,7 +17,7 @@ use corvo_chat_proto::{
 };
 use tokio::{
     sync::oneshot,
-    time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout_at},
+    time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout, timeout_at},
 };
 
 use crate::{AppState, accounts, hub::Kick};
@@ -32,6 +32,10 @@ pub const ANON_TIMEOUT: Duration = Duration::from_secs(300);
 pub const PING_EVERY: Duration = Duration::from_secs(30);
 /// How long a signed-in connection may send nothing (pongs count).
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long one write may wait for a client that doesn't read. A write
+/// blocks the loop and its timers, so this bounds how long any connection
+/// outlives its deadline.
+pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Each connection's id, so a stale connection can't let go of a session a
 /// newer one holds.
@@ -123,7 +127,7 @@ async fn run(socket: WebSocket, state: AppState) {
     if let Some(session) = link.conn.session() {
         link.state.hub.leave(session, link.id);
     }
-    let _ = link.socket.send(Message::Close(None)).await;
+    let _ = timeout(SEND_TIMEOUT, link.socket.send(Message::Close(None))).await;
 }
 
 impl Link {
@@ -159,12 +163,15 @@ impl Link {
         let mut heard = Instant::now();
         loop {
             let signed_in = self.conn.session().is_some();
+            // Kicks first, then the timers, then frames: a flood of frames
+            // never keeps a signed-out device served or a deadline unchecked.
             let event = tokio::select! {
-                message = self.socket.recv() => Event::Received(message),
-                _ = sleep_until(anon_until), if !signed_in => Event::AnonTimeout,
-                _ = ping.tick(), if signed_in => Event::Ping,
-                _ = sleep_until(heard + IDLE_TIMEOUT), if signed_in => Event::Idle,
+                biased;
                 kick = kicked(&mut self.kick), if signed_in => Event::Kicked(kick),
+                _ = sleep_until(anon_until), if !signed_in => Event::AnonTimeout,
+                _ = sleep_until(heard + IDLE_TIMEOUT), if signed_in => Event::Idle,
+                _ = ping.tick(), if signed_in => Event::Ping,
+                message = self.socket.recv() => Event::Received(message),
             };
             let flow = match event {
                 Event::Received(Some(Ok(message))) => {
@@ -222,10 +229,11 @@ impl Link {
         self.send_raw(Message::Text(text.into())).await
     }
 
+    /// Sends `message`, or gives up on the connection after [`SEND_TIMEOUT`].
     async fn send_raw(&mut self, message: Message) -> Flow {
-        match self.socket.send(message).await {
-            Ok(()) => Flow::Stay,
-            Err(_) => Flow::Close,
+        match timeout(SEND_TIMEOUT, self.socket.send(message)).await {
+            Ok(Ok(())) => Flow::Stay,
+            Ok(Err(_)) | Err(_) => Flow::Close,
         }
     }
 }

@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use common::client::{Client, start_server};
 use corvo_chat_proto::frames::{ClientFrame, ErrorCode, ServerFrame};
+use corvo_chat_server::ws::{ANON_TIMEOUT, SEND_TIMEOUT};
+use tokio::{net::TcpSocket, time::timeout};
 use tokio_tungstenite::tungstenite::Message;
 
 /// Asserts `frame` is an error with `code`.
@@ -76,4 +78,22 @@ async fn anonymous_connection_is_closed_after_five_minutes() {
     tokio::time::advance(Duration::from_secs(2)).await;
     tokio::time::resume();
     assert!(client.closed_within(Duration::from_millis(500)).await, "still open at 301 s");
+}
+
+#[tokio::test]
+async fn client_that_never_reads_is_closed_anyway() {
+    let server = start_server().await;
+    let socket = TcpSocket::new_v4().expect("a socket");
+    socket.set_recv_buffer_size(4096).expect("a small receive buffer");
+    let tcp = socket.connect(server.addr).await.expect("the server accepts");
+    let mut client = Client::connect_over(&server, tcp).await;
+    client.hello().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::pause();
+    // Bad frames, each answered, never read: the server's replies fill both
+    // buffers until its writes block. The paused clock moves only once every
+    // task waits, so the server's deadlines are what end this.
+    let spam = tokio::spawn(async move { while client.try_send_raw(Message::text("{")).await.is_ok() {} });
+    let deadline = ANON_TIMEOUT + 2 * SEND_TIMEOUT + Duration::from_secs(1);
+    timeout(deadline, spam).await.expect("closed by its deadlines").expect("the client task ends");
 }

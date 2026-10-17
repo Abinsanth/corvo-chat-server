@@ -21,7 +21,7 @@ use tokio::{net::TcpStream, time::timeout};
 use tokio_rustls::client::TlsStream;
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
-use super::{connect, start, state};
+use super::{connect_over, start, state};
 
 /// How long `recv` and `closed` wait.
 const WAIT: Duration = Duration::from_secs(5);
@@ -51,7 +51,12 @@ pub struct Client(WebSocketStream<TlsStream<TcpStream>>);
 
 impl Client {
     pub async fn connect(server: &TestServer) -> Client {
-        let tls = connect(server.addr, server.der.clone()).await;
+        Client::connect_over(server, TcpStream::connect(server.addr).await.expect("the server accepts")).await
+    }
+
+    /// Connects over a socket the test set up itself (a small receive buffer, say).
+    pub async fn connect_over(server: &TestServer, tcp: TcpStream) -> Client {
+        let tls = connect_over(tcp, server.der.clone()).await;
         let (ws, _) =
             tokio_tungstenite::client_async("wss://localhost/ws", tls).await.expect("the WebSocket handshake succeeds");
         Client(ws)
@@ -64,6 +69,11 @@ impl Client {
 
     pub async fn send_raw(&mut self, message: Message) {
         self.0.send(message).await.expect("the frame is sent");
+    }
+
+    /// Sends `message`; an error means the server closed the connection.
+    pub async fn try_send_raw(&mut self, message: Message) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+        self.0.send(message).await
     }
 
     /// The next frame. Panics after 5 s, or if the server closes.

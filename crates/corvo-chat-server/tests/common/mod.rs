@@ -52,6 +52,11 @@ pub async fn start(app: Router) -> (SocketAddr, CertificateDer<'static>) {
 }
 
 pub async fn connect(addr: SocketAddr, der: CertificateDer<'static>) -> TlsStream<TcpStream> {
+    connect_over(TcpStream::connect(addr).await.expect("the server accepts"), der).await
+}
+
+/// The TLS handshake over a socket the test made itself.
+pub async fn connect_over(tcp: TcpStream, der: CertificateDer<'static>) -> TlsStream<TcpStream> {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(der).expect("the test certificate is a valid root");
     let config = rustls::ClientConfig::builder_with_provider(ring())
@@ -59,7 +64,6 @@ pub async fn connect(addr: SocketAddr, der: CertificateDer<'static>) -> TlsStrea
         .expect("ring supports the defaults")
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let tcp = TcpStream::connect(addr).await.expect("the server accepts");
     let name = ServerName::try_from("localhost").expect("a valid name");
     TlsConnector::from(Arc::new(config)).connect(name, tcp).await.expect("the TLS handshake succeeds")
 }
