@@ -2,6 +2,8 @@
 //! certificate, and a client that trusts only that certificate.
 #![allow(dead_code)] // each test binary uses only some of these
 
+pub mod client;
+
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::Router;
@@ -10,6 +12,7 @@ use corvo_chat_server::{
     AppState, Tls,
     clock::Clock,
     db::{self, Db},
+    hub::Hub,
     limits::Limits,
     serve,
 };
@@ -79,6 +82,7 @@ pub fn state(limits: Limits) -> (AppState, TempDir) {
         setup: Arc::new(ServerSetup::<Suite>::new(&mut rand_core::OsRng)),
         clock: Clock::manual(1_800_000_000),
         limits: Arc::new(limits),
+        hub: Hub::default(),
     };
     (state, dir)
 }

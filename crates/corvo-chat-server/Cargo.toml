@@ -35,6 +35,7 @@ tracing-subscriber.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tokio-tungstenite.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 rlimit.workspace = true

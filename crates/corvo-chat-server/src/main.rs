@@ -5,6 +5,7 @@ use corvo_chat_server::{
     AppState, Tls, admin, app, cleanup,
     clock::Clock,
     db::{self, Db},
+    hub::Hub,
     key,
     limits::Limits,
     serve,
@@ -77,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
                 setup: Arc::new(setup),
                 clock: Clock::system(),
                 limits: Arc::new(limits),
+                hub: Hub::default(),
             };
             let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
             tracing::info!("corvo-chat-server {} listening on :{port} for {domain}", env!("CARGO_PKG_VERSION"));

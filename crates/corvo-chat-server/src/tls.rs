@@ -1,7 +1,7 @@
 //! TLS on our own socket: Let's Encrypt challenges are answered here, and every
-//! other connection goes to the router with its channel binding attached.
+//! other connection goes to the router with its peer address attached.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{Router, extract::Request};
 use futures::StreamExt;
@@ -13,9 +13,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{LazyConfigAcceptor, server::TlsStream};
 use tower::ServiceExt;
 
-/// The RFC 9266 exporter label for TLS 1.3 channel binding.
-pub const CHANNEL_BINDING_LABEL: &[u8] = b"EXPORTER-Channel-Binding";
-
 /// How long a connection may take to finish its TLS handshake.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -26,10 +23,10 @@ const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 /// idle connection doesn't hold its socket forever.
 pub const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// This connection's TLS exporter value, in every request's extensions. Both
-/// ends compute the same value; a middleman has a different one on each side.
+/// The address a connection comes from, in every request's extensions. The
+/// per-IP limits key on its IP.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChannelBinding(pub [u8; 32]);
+pub struct PeerAddr(pub SocketAddr);
 
 /// Where the server's certificate comes from.
 pub enum Tls {
@@ -60,8 +57,8 @@ pub async fn serve(listener: TcpListener, tls: Tls, app: Router) {
         }
     };
     loop {
-        let tcp = match listener.accept().await {
-            Ok((tcp, _)) => tcp,
+        let (tcp, peer) = match listener.accept().await {
+            Ok((tcp, addr)) => (tcp, PeerAddr(addr)),
             // Out of file handles, or a connection that died before we took it: wait a moment, keep serving.
             Err(err) => {
                 tracing::warn!("accept: {err}");
@@ -75,13 +72,8 @@ pub async fn serve(listener: TcpListener, tls: Tls, app: Router) {
             else {
                 return;
             };
-            let mut binding = [0; 32];
-            if stream.get_ref().1.export_keying_material(&mut binding, CHANNEL_BINDING_LABEL, None).is_err() {
-                return;
-            }
-            let binding = ChannelBinding(binding);
             let service = service_fn(move |mut req: Request<Incoming>| {
-                req.extensions_mut().insert(binding);
+                req.extensions_mut().insert(peer);
                 app.clone().oneshot(req)
             });
             // The header timer also runs while a connection sits idle, before or between requests.

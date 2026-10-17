@@ -5,7 +5,7 @@ use std::sync::Arc;
 use corvo_chat_proto::opaque::Suite;
 use opaque_ke::ServerSetup;
 
-use crate::{clock::Clock, db::Db, limits::Limits};
+use crate::{clock::Clock, db::Db, hub::Hub, limits::Limits};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -13,4 +13,6 @@ pub struct AppState {
     pub setup: Arc<ServerSetup<Suite>>,
     pub clock: Clock,
     pub limits: Arc<Limits>,
+    /// The connections holding live sessions.
+    pub hub: Hub,
 }
