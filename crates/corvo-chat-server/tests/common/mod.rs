@@ -2,6 +2,9 @@
 //! certificate, and a client that trusts only that certificate.
 #![allow(dead_code)] // each test binary uses only some of these
 
+pub mod client;
+pub mod person;
+
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::Router;
@@ -10,6 +13,7 @@ use corvo_chat_server::{
     AppState, Tls,
     clock::Clock,
     db::{self, Db},
+    hub::Hub,
     limits::Limits,
     serve,
 };
@@ -49,6 +53,11 @@ pub async fn start(app: Router) -> (SocketAddr, CertificateDer<'static>) {
 }
 
 pub async fn connect(addr: SocketAddr, der: CertificateDer<'static>) -> TlsStream<TcpStream> {
+    connect_over(TcpStream::connect(addr).await.expect("the server accepts"), der).await
+}
+
+/// The TLS handshake over a socket the test made itself.
+pub async fn connect_over(tcp: TcpStream, der: CertificateDer<'static>) -> TlsStream<TcpStream> {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(der).expect("the test certificate is a valid root");
     let config = rustls::ClientConfig::builder_with_provider(ring())
@@ -56,7 +65,6 @@ pub async fn connect(addr: SocketAddr, der: CertificateDer<'static>) -> TlsStrea
         .expect("ring supports the defaults")
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let tcp = TcpStream::connect(addr).await.expect("the server accepts");
     let name = ServerName::try_from("localhost").expect("a valid name");
     TlsConnector::from(Arc::new(config)).connect(name, tcp).await.expect("the TLS handshake succeeds")
 }
@@ -79,6 +87,7 @@ pub fn state(limits: Limits) -> (AppState, TempDir) {
         setup: Arc::new(ServerSetup::<Suite>::new(&mut rand_core::OsRng)),
         clock: Clock::manual(1_800_000_000),
         limits: Arc::new(limits),
+        hub: Hub::default(),
     };
     (state, dir)
 }

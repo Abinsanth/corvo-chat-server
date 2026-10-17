@@ -7,21 +7,24 @@ pub mod attempts;
 pub mod cleanup;
 pub mod clock;
 pub mod db;
+pub mod hub;
 pub mod invites;
 pub mod key;
 pub mod limits;
 pub mod sessions;
 pub mod state;
 mod tls;
+pub mod ws;
 
 use axum::{Router, routing::get};
 
 pub use state::AppState;
-pub use tls::{CHANNEL_BINDING_LABEL, ChannelBinding, HANDSHAKE_TIMEOUT, HEADER_TIMEOUT, Tls, serve};
+pub use tls::{HANDSHAKE_TIMEOUT, HEADER_TIMEOUT, PeerAddr, Tls, serve};
 
 /// Every route the server answers.
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/", get(|| async { concat!("corvo-chat-server ", env!("CARGO_PKG_VERSION")) }))
+        .route(ws::PATH, get(ws::upgrade))
         .with_state(state)
 }
