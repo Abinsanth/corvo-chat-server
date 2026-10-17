@@ -18,6 +18,8 @@ impl From<rusqlite::Error> for InviteError {
     }
 }
 
+/// The caller checks that the target account is pending.
+///
 /// Makes a fresh code for the pending account, replacing any earlier one
 /// (tries reset). The admin (`inviter: None`) has no cap; a user may have
 /// `open_max` open invites for other accounts.
@@ -66,6 +68,9 @@ pub fn open(conn: &Connection, inviter: i64, now: i64) -> rusqlite::Result<Vec<I
     .collect()
 }
 
+/// The caller checks that the pending account has not expired (`_now` is
+/// ignored).
+///
 /// Checks a code typed by the pending user. A match returns the inviter and
 /// uses the invite up. The `tries`th miss kills the code.
 pub fn redeem(

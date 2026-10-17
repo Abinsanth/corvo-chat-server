@@ -184,6 +184,7 @@ mod tests {
         assert_eq!(first.replaced, None);
         let second = create(&mut c, 1, &device(1), 20, 3).unwrap();
         assert_eq!(second.replaced, Some(first.id));
+        assert_ne!(second.id, first.id);
         assert!(by_token(&c, &first.token).unwrap().is_none());
         let found = by_token(&c, &second.token).unwrap().unwrap();
         assert_eq!((found.id, found.device, found.first_seen), (second.id, device(1), 20));
