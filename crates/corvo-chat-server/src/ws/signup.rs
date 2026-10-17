@@ -14,6 +14,7 @@ use crate::{
     accounts::{self, CreateError, NewAccount},
     attempts,
     invites::{self, InviteError},
+    limits::Limits,
     sessions,
 };
 
@@ -42,6 +43,27 @@ enum Start {
 enum Created {
     Done { token: [u8; 32], account_id: i64, session: i64, kick: tokio::sync::oneshot::Receiver<crate::hub::Kick> },
     Taken,
+    Limit(&'static str),
+}
+
+/// The signup limits, over a rolling 24 hours: the message of the one the
+/// device or network has reached.
+fn over_limit(
+    c: &rusqlite::Connection,
+    device_key: &str,
+    ip_key: &str,
+    now: i64,
+    limits: &Limits,
+) -> rusqlite::Result<Option<&'static str>> {
+    // Tries at or before `now - 24 h` have left the window.
+    let since = now - SIGNUP_WINDOW + 1;
+    if attempts::count_since(c, "signup_device", device_key, since)? >= i64::from(limits.signups_per_device_day) {
+        return Ok(Some("Only one new account per device per day."));
+    }
+    if attempts::count_since(c, "signup_ip", ip_key, since)? >= i64::from(limits.signups_per_ip_day) {
+        return Ok(Some("Too many new accounts from this network today."));
+    }
+    Ok(None)
 }
 
 impl Link {
@@ -71,15 +93,8 @@ impl Link {
             .state
             .db
             .call(move |c| -> rusqlite::Result<Start> {
-                // Tries at or before `now - 24 h` have left the window.
-                let since = now - SIGNUP_WINDOW + 1;
-                if attempts::count_since(c, "signup_device", &device_key, since)?
-                    >= i64::from(limits.signups_per_device_day)
-                {
-                    return Ok(Start::Limit("Only one new account per device per day."));
-                }
-                if attempts::count_since(c, "signup_ip", &ip_key, since)? >= i64::from(limits.signups_per_ip_day) {
-                    return Ok(Start::Limit("Too many new accounts from this network today."));
+                if let Some(message) = over_limit(c, &device_key, &ip_key, now, &limits)? {
+                    return Ok(Start::Limit(message));
                 }
                 let (username, number) = accounts::pick_name(c, &base)?;
                 Ok(Start::Offer(username, number))
@@ -148,15 +163,33 @@ impl Link {
             .state
             .db
             .call(move |c| -> Result<Created, String> {
+                // The starts can run side by side; the lock makes this check final.
+                if let Some(message) = over_limit(c, &device_key, &ip_key, now, &limits).map_err(|e| e.to_string())? {
+                    return Ok(Created::Limit(message));
+                }
                 let account_id = match accounts::create_pending(c, &new, now, limits.pending_secs) {
                     Ok(id) => id,
                     Err(CreateError::Taken) => return Ok(Created::Taken),
                     Err(CreateError::Db(err)) => return Err(err.to_string()),
                 };
-                attempts::note(c, "signup_device", &device_key, now).map_err(|e| e.to_string())?;
-                attempts::note(c, "signup_ip", &ip_key, now).map_err(|e| e.to_string())?;
-                let session =
-                    sessions::create(c, account_id, &device, now, limits.max_devices).map_err(|e| format!("{e:?}"))?;
+                // `sessions::create` has its own transaction, so a failure
+                // after the insert takes the account back out by hand.
+                let mut rest = || -> Result<sessions::NewSession, String> {
+                    attempts::note(c, "signup_device", &device_key, now).map_err(|e| e.to_string())?;
+                    attempts::note(c, "signup_ip", &ip_key, now).map_err(|e| e.to_string())?;
+                    sessions::create(c, account_id, &device, now, limits.max_devices).map_err(|e| format!("{e:?}"))
+                };
+                let session = match rest() {
+                    Ok(session) => session,
+                    Err(err) => {
+                        let _ = c.execute("DELETE FROM accounts WHERE id = ?1", [account_id]);
+                        let _ = c.execute(
+                            "DELETE FROM attempts WHERE at = ?1 AND kind LIKE 'signup_%' AND (key = ?2 OR key = ?3)",
+                            rusqlite::params![now, device_key, ip_key],
+                        );
+                        return Err(err);
+                    }
+                };
                 let kick = hub.join(session.id, conn_id);
                 Ok(Created::Done { token: session.token, account_id, session: session.id, kick })
             })
@@ -173,6 +206,10 @@ impl Link {
                 self.kick = Some(kick);
                 self.conn = Conn::SignedIn { session, account_id, reauthed_until: None };
                 self.send(&ServerFrame::SignedIn { token: B64(token), account, copy: None }).await
+            }
+            Ok(Created::Limit(message)) => {
+                self.conn = Conn::Anonymous;
+                self.error(ErrorCode::SignupLimit, message).await
             }
             Ok(Created::Taken) => {
                 self.conn = Conn::Anonymous;
@@ -219,7 +256,7 @@ impl Link {
             Ok(Err(ErrorCode::CodeDead)) => {
                 self.error(ErrorCode::CodeDead, "That code no longer works. Ask for a new invite.").await
             }
-            Ok(Err(code)) => self.error(code, "not expected now").await,
+            Ok(Err(_)) => self.error(ErrorCode::BadFrame, "not expected now").await,
             Err(err) => self.internal("activating", err).await,
         }
     }
@@ -240,7 +277,7 @@ impl Link {
                     Ok(code) => Ok(Ok(InviteInfo { number, display_name: target.display_name, code, expires_at })),
                     Err(InviteError::TooMany) => Ok(Err(ErrorCode::TooManyInvites)),
                     Err(InviteError::Db(err)) => Err(err),
-                    Err(InviteError::Wrong | InviteError::Dead) => unreachable!("only redeem says so"),
+                    Err(InviteError::Wrong | InviteError::Dead) => Ok(Err(ErrorCode::Internal)),
                 }
             })
             .await;
@@ -249,7 +286,10 @@ impl Link {
             Ok(Err(ErrorCode::NotPending)) => {
                 self.error(ErrorCode::NotPending, "That number isn't waiting for an invite.").await
             }
-            Ok(Err(code)) => self.error(code, "You have too many open invites.").await,
+            Ok(Err(ErrorCode::TooManyInvites)) => {
+                self.error(ErrorCode::TooManyInvites, "You have too many open invites.").await
+            }
+            Ok(Err(_)) => self.error(ErrorCode::Internal, "server error, try again").await,
             Err(err) => self.internal("inviting", err).await,
         }
     }

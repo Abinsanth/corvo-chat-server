@@ -55,7 +55,7 @@ pub async fn upgrade(
 }
 
 /// Where a connection is.
-#[expect(dead_code, reason = "signup, login, recovery and resume move a connection out of `Anonymous`")]
+#[expect(dead_code, reason = "login, recovery and resume still build `LoginOffered` and `Recovering`")]
 enum Conn {
     Anonymous,
     /// After `signup_offer`, waiting for `signup_finish`.

@@ -32,7 +32,13 @@ fn other_code(code: &str) -> String {
     if code == "000000" { "111111".into() } else { "000000".into() }
 }
 
-async fn count(server: &TestServer, sql: &'static str, arg: String) -> i64 {
+const ACCOUNT_ROWS: [&str; 3] = [
+    "SELECT COUNT(*) FROM accounts WHERE id = ?1",
+    "SELECT COUNT(*) FROM sessions WHERE account_id = ?1",
+    "SELECT COUNT(*) FROM invites WHERE account_id = ?1",
+];
+
+async fn count(server: &TestServer, sql: &'static str, arg: impl rusqlite::ToSql + Send + 'static) -> i64 {
     server.state.db.call(move |c| c.query_row(sql, [arg], |r| r.get(0)).unwrap()).await
 }
 
@@ -189,17 +195,16 @@ async fn pending_account_expires_after_a_day() {
     let (pending, mut client) = Person::sign_up(&server, "abin").await;
     let invite = invite(&mut inviter_client, pending.number).await;
     let id = pending.id(&server).await;
+    for sql in ACCOUNT_ROWS {
+        assert_eq!(count(&server, sql, id).await, 1, "{sql}");
+    }
     server.state.clock.advance(86_400);
     client.send(&ClientFrame::Activate { code: invite.code }).await;
     assert_error(client.recv().await, ErrorCode::SignupExpired);
     assert_eq!(client.recv().await, ServerFrame::SignedOut { reason: SignedOutReason::Expired });
     assert!(client.closed().await);
-    for sql in [
-        "SELECT COUNT(*) FROM accounts WHERE id = ?1",
-        "SELECT COUNT(*) FROM sessions WHERE account_id = ?1",
-        "SELECT COUNT(*) FROM invites WHERE account_id = ?1",
-    ] {
-        assert_eq!(server.state.db.call(move |c| c.query_row(sql, [id], |r| r.get::<_, i64>(0)).unwrap()).await, 0);
+    for sql in ACCOUNT_ROWS {
+        assert_eq!(count(&server, sql, id).await, 0, "{sql}");
     }
     let (name, number) = (pending.username.clone(), pending.number);
     let now = server.state.clock.now();
@@ -235,8 +240,10 @@ async fn fourth_signup_from_one_ip_in_a_day_is_refused() {
         kept.push(Person::try_sign_up(&server, "abin", device("laptop")).await.expect("within the limit"));
     }
     match Person::try_sign_up(&server, "abin", device("laptop")).await {
-        Err(frame) => assert_error(frame, ErrorCode::SignupLimit),
-        Ok(_) => panic!("a fourth signup from one address"),
+        Err(ServerFrame::Error { code: ErrorCode::SignupLimit, message, .. }) => {
+            assert_eq!(message, "Too many new accounts from this network today.");
+        }
+        other => panic!("expected signup_limit, got {:?}", other.map(|_| ())),
     }
 }
 
@@ -245,8 +252,26 @@ async fn sign_out_closes_and_deletes_the_session() {
     let server = start_server().await;
     let (person, mut client) = Person::sign_up(&server, "abin").await;
     let id = person.id(&server).await;
+    assert_eq!(count(&server, "SELECT COUNT(*) FROM sessions WHERE account_id = ?1", id).await, 1);
     client.send(&ClientFrame::SignOut).await;
     assert_eq!(client.recv().await, ServerFrame::SignedOut { reason: SignedOutReason::ThisDevice });
     assert!(client.closed().await);
-    assert_eq!(count(&server, "SELECT COUNT(*) FROM sessions WHERE account_id = ?1", id.to_string()).await, 0);
+    assert_eq!(count(&server, "SELECT COUNT(*) FROM sessions WHERE account_id = ?1", id).await, 0);
+}
+
+#[tokio::test]
+async fn parallel_signups_from_one_device_cannot_beat_the_limit() {
+    let server = start_server().await;
+    let device = device("laptop");
+    let mut first = Client::connect(&server).await;
+    let mut second = Client::connect(&server).await;
+    first.hello().await;
+    second.hello().await;
+    let a = begin_signup(&mut first, "abin", "Abin", device.clone()).await.expect("an offer");
+    let b = begin_signup(&mut second, "abin", "Abin", device).await.expect("an offer");
+    first.send(&a.finish).await;
+    assert!(matches!(first.recv().await, ServerFrame::SignedIn { .. }));
+    second.send(&b.finish).await;
+    assert_error(second.recv().await, ErrorCode::SignupLimit);
+    assert_eq!(count(&server, "SELECT COUNT(*) FROM accounts WHERE username = ?1", b.username).await, 0);
 }
