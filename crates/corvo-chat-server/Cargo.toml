@@ -13,11 +13,18 @@ corvo-chat-proto.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+data-encoding.workspace = true
 futures.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+opaque-ke.workspace = true
+rand.workspace = true
+rand_core.workspace = true
 rustls.workspace = true
 rustls-acme.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 tower.workspace = true
@@ -26,6 +33,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(unix)'.dev-dependencies]
