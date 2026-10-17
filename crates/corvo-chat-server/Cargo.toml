@@ -1,0 +1,16 @@
+[package]
+name = "corvo-chat-server"
+description = "The corvo-chat server: stores and forwards ciphertext only"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+corvo-chat-proto.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

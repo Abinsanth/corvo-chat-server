@@ -1,0 +1,87 @@
+name: CI
+
+# Every push and PR runs CI, docs-only ones too: a skipped run never reports its
+# checks, so once they're required, a docs-only PR could never merge.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same pull request cancels the older run; runs on main always finish.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      # --locked fails if Cargo.lock wasn't updated with Cargo.toml.
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # rustls-family crates must use ring: aws-lc-rs needs CMake on musl and Windows.
+      - name: TLS uses ring, not aws-lc-rs
+        # The tree goes in a variable first, so the step fails if cargo tree does.
+        run: |
+          tree=$(cargo tree --locked --workspace -e normal)
+          if grep aws-lc <<< "$tree"; then
+            echo "something pulls in aws-lc-rs; set default-features = false and use ring"
+            exit 1
+          fi
+
+  # Linux clippy never sees cfg(windows) code.
+  clippy-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  # The oldest Rust that Cargo.toml's rust-version promises.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --workspace --all-targets
+
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --workspace
+
+  # The static Linux build the server runs; main's build is the one deployed.
+  server-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --locked --release --target x86_64-unknown-linux-musl -p corvo-chat-server
+      - if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: corvo-chat-server-x86_64-linux
+          path: target/x86_64-unknown-linux-musl/release/corvo-chat-server
+          retention-days: 30
