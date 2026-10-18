@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use corvo_chat_proto::{
     B64, Blob, Body, Number,
-    chat::{Event, Message, NewChat, Snapshot},
+    chat::{Event, EventBody, Message, NewChat, Person, Snapshot},
     chat_proof,
     frames::{ClientFrame, ServerFrame},
 };
@@ -15,7 +15,7 @@ use tokio::time::timeout;
 
 use super::{
     client::{Client, TestServer},
-    person::Person,
+    person::Person as TestPerson,
 };
 
 /// How long `quiet` waits for a frame that shouldn't come.
@@ -28,7 +28,7 @@ pub fn random_id() -> B64<16> {
 
 /// The `new_chat` of a first message from `sender` to `to`: random sealed
 /// keys, signed with the sender's key.
-pub fn new_chat(sender: &Person, chat_id: &B64<16>, to: Number) -> NewChat {
+pub fn new_chat(sender: &TestPerson, chat_id: &B64<16>, to: Number) -> NewChat {
     let (my_key, their_key) = (rand::random::<[u8; 104]>().to_vec(), rand::random::<[u8; 104]>().to_vec());
     let proof = chat_proof(&chat_id.0, sender.number, &my_key, to, &their_key);
     NewChat {
@@ -36,6 +36,15 @@ pub fn new_chat(sender: &Person, chat_id: &B64<16>, to: Number) -> NewChat {
         my_key: Blob(my_key),
         their_key: Blob(their_key),
         signature: B64(sender.keys.sign(&proof).to_bytes()),
+    }
+}
+
+/// Starts a chat from `from` to `to` with one message; returns its id.
+pub async fn first_message(client: &mut Client, from: &TestPerson, to: Number) -> B64<16> {
+    let chat_id = random_id();
+    match client.send_body(&chat_id, b"hello".to_vec(), Some(new_chat(from, &chat_id, to))).await {
+        ServerFrame::Sent { seq: 1, .. } => chat_id,
+        other => panic!("expected the first message sent, got {other:?}"),
     }
 }
 
@@ -114,6 +123,25 @@ impl Client {
         }
     }
 
+    /// Reads pushed frames until 300 ms pass without one, and forgets them.
+    pub async fn drain(&mut self) {
+        while !self.quiet().await {
+            self.events.clear();
+            self.presence.clear();
+        }
+    }
+
+    /// The next pushed `person` event about `number`, skipping other events.
+    pub async fn next_person(&mut self, number: Number) -> Person {
+        loop {
+            if let EventBody::Person { person } = self.next_event().await.event
+                && person.number == number
+            {
+                return person;
+            }
+        }
+    }
+
     /// Whether no event or presence arrives within 300 ms. Only for checking
     /// that something doesn't happen.
     pub async fn quiet(&mut self) -> bool {
@@ -131,16 +159,16 @@ impl Client {
 }
 
 /// Two active people with one synced connection each.
-pub async fn strangers(server: &TestServer) -> (Person, Client, Person, Client) {
-    let (a, mut a_client) = Person::active(server, "abin").await;
-    let (b, mut b_client) = Person::active(server, "rahul").await;
+pub async fn strangers(server: &TestServer) -> (TestPerson, Client, TestPerson, Client) {
+    let (a, mut a_client) = TestPerson::active(server, "abin").await;
+    let (b, mut b_client) = TestPerson::active(server, "rahul").await;
     a_client.sync_from(Some(0)).await;
     b_client.sync_from(Some(0)).await;
     (a, a_client, b, b_client)
 }
 
 /// Like `strangers`, befriended in the database.
-pub async fn contacts(server: &TestServer) -> (Person, Client, Person, Client) {
+pub async fn contacts(server: &TestServer) -> (TestPerson, Client, TestPerson, Client) {
     let (a, a_client, b, b_client) = strangers(server).await;
     let (a_id, b_id, now) = (a.id(server).await, b.id(server).await, server.state.clock.now());
     server.state.db.call(move |c| relations::befriend(c, a_id, b_id, now).unwrap()).await;

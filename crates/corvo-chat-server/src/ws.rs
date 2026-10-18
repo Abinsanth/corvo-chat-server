@@ -31,6 +31,7 @@ use crate::{
 
 mod chat;
 mod devices;
+mod people;
 mod secrets;
 mod sign_in;
 mod signup;
@@ -142,8 +143,10 @@ async fn run(socket: WebSocket, state: AppState, ip: IpAddr) {
     if let Ok(Flow::Stay) = timeout_at(anon_until, link.hello()).await {
         link.serve(anon_until).await;
     }
-    if let Some(session) = link.conn.session() {
-        link.state.hub.leave(session, link.id);
+    if let Some(session) = link.conn.session()
+        && let Some(account) = link.state.hub.leave(session, link.id)
+    {
+        link.tell_contacts(account).await;
     }
     let _ = timeout(SEND_TIMEOUT, link.socket.send(Message::Close(None))).await;
 }
@@ -283,14 +286,20 @@ impl Link {
             F::SignOut => self.sign_out().await,
             F::Sync { cursor } => self.sync(cursor).await,
             F::Lookup { number } => self.lookup(number).await,
+            F::Accept { number } => self.relate(number, people::Change::Accept).await,
+            F::Reject { number } => self.relate(number, people::Change::Reject).await,
+            F::Block { number } => self.relate(number, people::Change::Block).await,
+            F::Unblock { number } => self.relate(number, people::Change::Unblock).await,
+            F::Remove { number, clear_history } => self.relate(number, people::Change::Remove { clear_history }).await,
             F::Received { chat_id, through } => self.ack(chat_id, through, false).await,
             F::Read { chat_id, through } => self.ack(chat_id, through, true).await,
             F::History { chat_id, before, limit } => self.history(chat_id, before, limit).await,
             F::Send { chat_id, msg_id, body, new_chat } => self.send_message(chat_id, msg_id, body, new_chat).await,
             // The gate refuses a second hello.
             F::Hello { .. } => self.error(ErrorCode::BadFrame, "not expected now").await,
-            // Chats and sync arrive in the next changes.
-            _ => self.error(ErrorCode::BadFrame, "not supported yet").await,
+            F::SetDisplayName { display_name } => self.set_display_name(display_name).await,
+            F::RenameDevice { name } => self.rename_device(name).await,
+            F::SetPin { pin } => self.set_pin(pin).await,
         }
     }
 

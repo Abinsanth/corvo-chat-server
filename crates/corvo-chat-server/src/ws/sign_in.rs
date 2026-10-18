@@ -254,6 +254,7 @@ impl Link {
                     Err(SessionError::Db(err)) => return Err(err),
                 };
                 attempts::note(c, "sign_in", &key, now)?;
+                crate::events::note_devices(c, &hub, account_id)?;
                 let copy = accounts::copy(c, account_id, Which::Password)?;
                 let joined = join(&hub, account_id, conn_id, &session);
                 Ok(SignIn::Done(Box::new(Done {
@@ -322,7 +323,31 @@ impl Link {
         self.kick = Some(joined.kick);
         self.push = Some(joined.push);
         self.conn = Conn::SignedIn { session, account_id, reauthed_until: None, reauth: None };
-        self.send(&ServerFrame::SignedIn { token: B64(token), account, copy }).await
+        let flow = self.send(&ServerFrame::SignedIn { token: B64(token), account, copy }).await;
+        if joined.came_online {
+            self.tell_contacts(account_id).await;
+        }
+        flow
+    }
+
+    /// Tells the account's mutual contacts whether it's online now. The
+    /// state is read when they're told, so a join and a leave racing each
+    /// other still end with the right word.
+    pub(super) async fn tell_contacts(&mut self, account: i64) {
+        let (now, hub) = (self.state.clock.now(), self.state.hub.clone());
+        let told = self
+            .state
+            .db
+            .call(move |c| -> rusqlite::Result<()> {
+                let Some(row) = accounts::by_id(c, account, now)? else { return Ok(()) };
+                let contacts = crate::relations::mutual_contacts(c, account)?;
+                hub.announce(account, row.number, &contacts, true);
+                Ok(())
+            })
+            .await;
+        if let Err(err) = told {
+            tracing::error!("telling contacts about account {account}: {err}");
+        }
     }
 
     /// A signed-in device proves the password again. It counts toward the

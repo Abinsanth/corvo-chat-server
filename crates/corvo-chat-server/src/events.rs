@@ -5,6 +5,8 @@
 use corvo_chat_proto::Number;
 use rusqlite::{Connection, Row, params};
 
+use crate::hub::{Hub, Push};
+
 /// What changed for an account.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ev {
@@ -86,6 +88,13 @@ pub fn append(c: &Connection, account: i64, ev: &Ev) -> rusqlite::Result<i64> {
         params![account, seq, kind, chat.map(|id| id.to_vec()), other, msg_seq, number],
     )?;
     Ok(seq)
+}
+
+/// The account's devices changed: a `Devices` event, and its devices told.
+pub fn note_devices(c: &Connection, hub: &Hub, account: i64) -> rusqlite::Result<()> {
+    append(c, account, &Ev::Devices)?;
+    hub.push(account, Push::Events);
+    Ok(())
 }
 
 /// Up to `limit` events after `after`, in order.

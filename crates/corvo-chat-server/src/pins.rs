@@ -26,6 +26,10 @@ pub fn get(c: &Connection, account: i64, number: Number) -> rusqlite::Result<Opt
     .optional()
 }
 
+pub fn count(c: &Connection, account: i64) -> rusqlite::Result<i64> {
+    c.query_row("SELECT COUNT(*) FROM pins WHERE account_id = ?1", [account], |r| r.get(0))
+}
+
 /// Every pin of the account, by number.
 pub fn all(c: &Connection, account: i64) -> rusqlite::Result<Vec<(Number, Vec<u8>)>> {
     let mut stmt = c.prepare("SELECT number, pin FROM pins WHERE account_id = ?1 ORDER BY number")?;

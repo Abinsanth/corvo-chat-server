@@ -32,6 +32,11 @@ async fn append(server: &TestServer, account: i64, evs: Vec<Ev>) {
         .await;
 }
 
+/// The account's last event seq.
+async fn head(server: &TestServer, account: i64) -> i64 {
+    server.state.db.call(move |c| events::head(c, account).unwrap()).await
+}
+
 fn pins(n: u32) -> Vec<Ev> {
     (0..n).map(|i| Ev::Pin { number: Number::from_body(100_000_000 + i).unwrap() }).collect()
 }
@@ -40,11 +45,13 @@ fn pins(n: u32) -> Vec<Ev> {
 async fn sync_from_zero_replays_the_log_then_says_synced() {
     let server = start_server().await;
     let (abin, mut a) = Person::active(&server, "abin").await;
-    append(&server, abin.id(&server).await, pins(3)).await;
-    let synced = a.sync_from(Some(0)).await;
-    assert_eq!(synced.events.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2, 3]);
+    let id = abin.id(&server).await;
+    let base = head(&server, id).await;
+    append(&server, id, pins(3)).await;
+    let synced = a.sync_from(Some(base)).await;
+    assert_eq!(synced.events.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![base + 1, base + 2, base + 3]);
     assert!(synced.events.iter().all(|e| matches!(e.event, EventBody::Pin { .. })));
-    assert_eq!(synced.cursor, 3);
+    assert_eq!(synced.cursor, base + 3);
 }
 
 #[tokio::test]
@@ -54,11 +61,12 @@ async fn live_events_arrive_after_sync_and_not_before() {
     let id = abin.id(&server).await;
     append(&server, id, pins(1)).await;
     assert!(a.quiet().await, "an unsynced device gets no pushes");
-    let synced = a.sync_from(Some(1)).await;
+    let at = head(&server, id).await;
+    let synced = a.sync_from(Some(at)).await;
     assert!(synced.events.is_empty());
-    assert_eq!(synced.cursor, 1);
+    assert_eq!(synced.cursor, at);
     append(&server, id, pins(1)).await;
-    assert_eq!(a.next_event().await.seq, 2);
+    assert_eq!(a.next_event().await.seq, at + 1);
     assert!(a.quiet().await);
 }
 
@@ -66,15 +74,17 @@ async fn live_events_arrive_after_sync_and_not_before() {
 async fn pages_stop_at_one_hundred_events() {
     let server = start_server().await;
     let (abin, mut a) = Person::active(&server, "abin").await;
-    append(&server, abin.id(&server).await, pins(250)).await;
-    a.send(&ClientFrame::Sync { cursor: Some(0) }).await;
+    let id = abin.id(&server).await;
+    let base = head(&server, id).await;
+    append(&server, id, pins(250)).await;
+    a.send(&ClientFrame::Sync { cursor: Some(base) }).await;
     for (len, cursor) in [(100, 100), (100, 200), (50, 250)] {
         match a.recv_raw().await {
-            ServerFrame::Events { events, cursor: got } => assert_eq!((events.len(), got), (len, cursor)),
+            ServerFrame::Events { events, cursor: got } => assert_eq!((events.len(), got), (len, base + cursor)),
             other => panic!("expected events, got {other:?}"),
         }
     }
-    assert_eq!(a.recv_raw().await, ServerFrame::Synced { cursor: 250 });
+    assert_eq!(a.recv_raw().await, ServerFrame::Synced { cursor: base + 250 });
 }
 
 #[tokio::test]
@@ -85,10 +95,11 @@ async fn hidden_events_still_move_the_cursor() {
     let (a_id, b_id, now) = (abin.id(&server).await, rahul.id(&server).await, server.state.clock.now());
     // Rahul's chat with Abin exists, but hasn't been announced to Abin.
     server.state.db.call(move |c| chats::create(c, &[1; 16], b_id, a_id, &[1], &[2], &[3; 64], now).unwrap()).await;
+    let base = head(&server, a_id).await;
     append(&server, a_id, vec![Ev::Chat { chat: [1; 16] }]).await;
-    a.send(&ClientFrame::Sync { cursor: Some(0) }).await;
-    assert_eq!(a.recv_raw().await, ServerFrame::Events { events: vec![], cursor: 1 });
-    assert_eq!(a.recv_raw().await, ServerFrame::Synced { cursor: 1 });
+    a.send(&ClientFrame::Sync { cursor: Some(base) }).await;
+    assert_eq!(a.recv_raw().await, ServerFrame::Events { events: vec![], cursor: base + 1 });
+    assert_eq!(a.recv_raw().await, ServerFrame::Synced { cursor: base + 1 });
 }
 
 /// Abin and Rahul as contacts with 120 messages between them (60 each, to
@@ -159,10 +170,12 @@ async fn history_of_a_chat_i_am_not_in_is_refused() {
 async fn cursor_past_the_head_gets_a_snapshot() {
     let server = start_server().await;
     let (abin, mut a) = Person::active(&server, "abin").await;
-    append(&server, abin.id(&server).await, pins(2)).await;
-    let synced = a.sync_from(Some(12)).await;
-    assert_eq!(synced.snapshot.expect("a snapshot").cursor, 2);
-    assert_eq!(synced.cursor, 2);
+    let id = abin.id(&server).await;
+    append(&server, id, pins(2)).await;
+    let at = head(&server, id).await;
+    let synced = a.sync_from(Some(at + 10)).await;
+    assert_eq!(synced.snapshot.expect("a snapshot").cursor, at);
+    assert_eq!(synced.cursor, at);
 }
 
 #[tokio::test]
@@ -195,11 +208,14 @@ async fn offline_device_catches_up_to_the_same_state() {
         a.send_body(&chat_id, n.to_string().into_bytes(), None).await;
     }
 
-    // The connected device saw everything live and applies the clear.
-    let mut live = Vec::new();
-    let mut cleared = 0;
-    let mut last = 0;
-    while live.len() < 7 || cleared == 0 {
+    // The device that was away catches up from its cursor.
+    let (mut phone, _) = rahul.sign_in(&server, &device("phone")).await;
+    let synced = phone.sync_from(Some(cursor)).await;
+
+    // The connected device saw everything live, up to the same place, and
+    // applies the clear.
+    let (mut live, mut cleared, mut last) = (Vec::new(), 0, 0);
+    while last < synced.cursor {
         let event = b.next_event().await;
         last = event.seq;
         match event.event {
@@ -209,10 +225,6 @@ async fn offline_device_catches_up_to_the_same_state() {
         }
     }
     let live: Vec<i64> = live.into_iter().filter(|seq| *seq > cleared).collect();
-
-    // The device that was away catches up from its cursor to the same place.
-    let (mut phone, _) = rahul.sign_in(&server, &device("phone")).await;
-    let synced = phone.sync_from(Some(cursor)).await;
     let caught_up: Vec<i64> = synced
         .events
         .iter()
@@ -224,4 +236,23 @@ async fn offline_device_catches_up_to_the_same_state() {
     assert_eq!(caught_up, live);
     assert_eq!(caught_up, vec![6, 7]);
     assert_eq!(synced.cursor, last);
+}
+
+#[tokio::test]
+async fn big_histories_are_split_by_bytes() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = contacts(&server).await;
+    let chat_id = random_id();
+    a.send_body(&chat_id, vec![1; 60_000], Some(new_chat(&abin, &chat_id, rahul.number))).await;
+    for _ in 2..=12 {
+        a.send_body(&chat_id, vec![1; 60_000], None).await;
+    }
+    let (mut phone, _) = rahul.sign_in(&server, &device("phone")).await;
+    let synced = phone.sync_from(None).await;
+    let (_, messages, complete) = &synced.histories[0];
+    assert!(!complete && messages.len() < 12, "{} messages in one frame", messages.len());
+    assert_eq!(messages.last().map(|m| m.seq), Some(12), "the newest come first");
+    let (older, done) = history(&mut b, &chat_id, messages[0].seq, 50).await;
+    assert!(older.len() < 12 && older.last() == Some(&(messages[0].seq - 1)));
+    let _ = done;
 }

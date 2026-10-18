@@ -9,12 +9,12 @@ use corvo_chat_proto::{
 };
 use rusqlite::Connection;
 
-use super::{Conn, Flow, Link, sign_in::HOUR};
+use super::{Conn, Flow, Link, people::announce_pair, sign_in::HOUR};
 use crate::{
     accounts, attempts,
     chats::{self, Added, ChatError},
     events::{self, Ev},
-    hub::Push,
+    hub::{Hub, Push},
     limits::Limits,
     relations,
 };
@@ -36,17 +36,54 @@ enum Looked {
     Limit,
 }
 
-/// Accounts whose logs got events, to poke once the writes are in.
+/// Accounts whose logs got events, and pairs who now see each other online,
+/// to tell once the writes are in.
 #[derive(Default)]
-struct Touched(Vec<i64>);
+pub(super) struct Touched {
+    accounts: Vec<i64>,
+    shown: Vec<((i64, Number), (i64, Number))>,
+}
 
 impl Touched {
-    fn append(&mut self, c: &Connection, account: i64, ev: &Ev) -> rusqlite::Result<()> {
+    pub(super) fn append(&mut self, c: &Connection, account: i64, ev: &Ev) -> rusqlite::Result<()> {
         events::append(c, account, ev)?;
-        self.0.push(account);
+        self.accounts.push(account);
         Ok(())
     }
+
+    /// The two became mutual contacts: each is to see the other online.
+    pub(super) fn show(&mut self, a: (i64, Number), b: (i64, Number)) {
+        self.shown.push((a, b));
+    }
+
+    /// Pokes every account that got an event, once each, and announces the
+    /// pairs that now see each other.
+    pub(super) fn poke(mut self, hub: &Hub) {
+        self.accounts.sort_unstable();
+        self.accounts.dedup();
+        for account in self.accounts {
+            hub.push(account, Push::Events);
+        }
+        for (a, b) in self.shown {
+            announce_pair(hub, a, b, true);
+        }
+    }
 }
+
+/// Counts one number lookup for `me`: `false` when the hour's are used up.
+/// Every frame that finds out whether a number exists pays one, so the
+/// lookup limit can't be got around.
+pub(super) fn charge_lookup(c: &Connection, me: i64, now: i64, limits: &Limits) -> rusqlite::Result<bool> {
+    let key = me.to_string();
+    if attempts::count_since(c, "lookup", &key, now - HOUR + 1)? >= i64::from(limits.lookups_per_hour) {
+        return Ok(false);
+    }
+    attempts::note(c, "lookup", &key, now)?;
+    Ok(true)
+}
+
+/// The refusal once the lookups are used up.
+pub(super) const LOOKUP_LIMIT: &str = "Too many lookups. Wait an hour.";
 
 /// What one `send` carries.
 struct Outgoing {
@@ -133,27 +170,40 @@ fn store(
         }
         Relation::Asked | Relation::Contact => {}
     }
+    let mut new_request = false;
     let shown = match relations::get(c, other, me)? {
         Relation::Blocked => false,
         Relation::Contact => true,
         // Each asked the other: that's agreement.
+        // Each asked the other: that's agreement, with all an accept brings.
         Relation::Asked => {
             relations::befriend(c, me, other, now)?;
             touched.append(c, me, &Ev::Person { other })?;
             touched.append(c, other, &Ev::Person { other: me })?;
+            touched.append(c, me, &Ev::Marks { chat: chat.id })?;
+            touched.append(c, other, &Ev::Marks { chat: chat.id })?;
+            let number = |id| -> rusqlite::Result<Number> {
+                Ok(accounts::by_id(c, id, now)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?.number)
+            };
+            touched.show((me, number(me)?), (other, number(other)?));
             true
         }
-        Relation::Request => chats::visible_from_since_clear(c, &chat.id, me, other)? < limits.request_messages,
+        Relation::Request => chats::request_messages(c, &chat.id, me, other)? < limits.request_messages,
         Relation::None => {
             let room = relations::open_requests(c, other)? < limits.open_requests;
             if room {
                 relations::set(c, other, me, Relation::Request, now)?;
                 touched.append(c, other, &Ev::Person { other: me })?;
             }
+            new_request = room;
             room
         }
     };
     let added = chats::add_message(c, &chat.id, &out.msg_id, me, &out.body, now, !shown)?;
+    if new_request {
+        // The request's 20 messages count from here, not from older history.
+        chats::start_request(c, &chat.id, other, added.seq)?;
+    }
     attempts::note(c, "message", &key, now)?;
     let ev = Ev::Message { chat: chat.id, seq: added.seq };
     touched.append(c, me, &ev)?;
@@ -176,11 +226,9 @@ impl Link {
             .state
             .db
             .call(move |c| -> rusqlite::Result<Looked> {
-                let key = account_id.to_string();
-                if attempts::count_since(c, "lookup", &key, now - HOUR + 1)? >= i64::from(limits.lookups_per_hour) {
+                if !charge_lookup(c, account_id, now, &limits)? {
                     return Ok(Looked::Limit);
                 }
-                attempts::note(c, "lookup", &key, now)?;
                 match accounts::active_by_number(c, number, now)?.filter(|row| row.id != account_id) {
                     Some(row) => Ok(Looked::Found(row.number, accounts::public_keys(c, row.id)?)),
                     None => Ok(Looked::Unknown),
@@ -190,7 +238,7 @@ impl Link {
         match looked {
             Ok(Looked::Found(number, public_keys)) => self.send(&ServerFrame::Found { number, public_keys }).await,
             Ok(Looked::Unknown) => self.error(ErrorCode::NumberUnknown, "That number isn't on corvo-chat.").await,
-            Ok(Looked::Limit) => self.error(ErrorCode::RateLimited, "Too many lookups. Wait an hour.").await,
+            Ok(Looked::Limit) => self.error(ErrorCode::RateLimited, LOOKUP_LIMIT).await,
             Err(err) => self.internal("looking up a number", err).await,
         }
     }
@@ -211,15 +259,24 @@ impl Link {
             .state
             .db
             .call(move |c| -> rusqlite::Result<Result<Added, Refused>> {
+                // A new chat finds out whether a number exists: charged
+                // before the transaction, so a refusal can't roll it back.
+                if out.new_chat.is_some()
+                    && chats::get(c, &out.chat_id)?.is_none()
+                    && !charge_lookup(c, account_id, now, &limits)?
+                {
+                    return refused(ErrorCode::RateLimited, LOOKUP_LIMIT);
+                }
                 let mut touched = Touched::default();
                 let tx = c.transaction()?;
                 let stored = store(&tx, account_id, &out, now, &limits, &mut touched)?;
-                tx.commit()?;
-                touched.0.sort_unstable();
-                touched.0.dedup();
-                for account in touched.0 {
-                    hub.push(account, Push::Events);
+                // A refusal leaves nothing behind, except the announce of an
+                // existing chat, which the sender needs.
+                if matches!(&stored, Err(Refused(code, _)) if *code != ErrorCode::ChatExists) {
+                    return Ok(stored);
                 }
+                tx.commit()?;
+                touched.poke(&hub);
                 Ok(stored)
             })
             .await;
@@ -271,9 +328,7 @@ impl Link {
                     touched.append(&tx, other, &Ev::Marks { chat })?;
                 }
                 tx.commit()?;
-                for account in touched.0 {
-                    hub.push(account, Push::Events);
-                }
+                touched.poke(&hub);
                 Ok(true)
             })
             .await;

@@ -1,12 +1,12 @@
 mod common;
 
 use common::{
-    chat::{contacts, new_chat, random_id, strangers},
+    chat::{contacts, first_message, new_chat, random_id, strangers},
     client::{Client, TestServer, assert_error, start_server, start_server_with},
     person::{Person, device},
 };
 use corvo_chat_proto::{
-    B64, Number,
+    Number,
     chat::{Event, EventBody, Marks, Message, Relation},
     frames::{ClientFrame, ErrorCode, ServerFrame},
 };
@@ -35,14 +35,6 @@ fn assert_not_sent(frame: ServerFrame, code: ErrorCode) {
         ServerFrame::NotSent { code: got, .. } => assert_eq!(got, code),
         other => panic!("expected not_sent {code:?}, got {other:?}"),
     }
-}
-
-/// Starts a chat from `from` to `to` with one message; returns its id.
-async fn first_message(client: &mut Client, from: &Person, to: Number) -> B64<16> {
-    let chat_id = random_id();
-    let sent = client.send_body(&chat_id, b"hello".to_vec(), Some(new_chat(from, &chat_id, to))).await;
-    assert_eq!(assert_sent(&sent), 1);
-    chat_id
 }
 
 /// The next pushed message, skipping other events.
@@ -397,4 +389,16 @@ async fn acks_for_a_chat_i_am_not_in_are_refused() {
     let chat_id = first_message(&mut a, &abin, rahul.number).await;
     s.send(&ClientFrame::Read { chat_id, through: 1 }).await;
     assert_error(s.recv().await, ErrorCode::ChatUnknown);
+}
+
+#[tokio::test]
+async fn refused_first_message_leaves_no_chat() {
+    let server =
+        start_server_with(Limits { signups_per_ip_day: 1_000, new_people_per_day: 0, ..Limits::default() }).await;
+    let (abin, mut a, rahul, _b) = strangers(&server).await;
+    let chat_id = random_id();
+    let refused = a.send_body(&chat_id, b"x".to_vec(), Some(new_chat(&abin, &chat_id, rahul.number))).await;
+    assert_not_sent(refused, ErrorCode::RateLimited);
+    assert_eq!(count(&server, "SELECT COUNT(*) FROM chats WHERE ?1 = 1", 1).await, 0);
+    assert!(a.quiet().await, "no chat event");
 }

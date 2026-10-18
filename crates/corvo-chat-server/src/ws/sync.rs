@@ -161,11 +161,11 @@ fn page(c: &Connection, viewer: Viewer, after: i64, upto: Option<i64>) -> rusqli
     Ok(last.map(|last| (shown, last)))
 }
 
-/// What a new device starts from: the snapshot, and the latest messages of
-/// each chat (oldest first, and whether that's all of them).
+/// What a new device starts from: the snapshot, and each chat's id and last
+/// seq, to page its latest messages from one call at a time.
 struct Initial {
     snapshot: Snapshot,
-    histories: Vec<(B64<16>, Vec<Message>, bool)>,
+    chats: Vec<([u8; 16], i64)>,
 }
 
 /// Stored messages as frames, dropping any whose sender is gone.
@@ -182,7 +182,7 @@ fn message_frames(
     Ok(messages)
 }
 
-fn initial(c: &Connection, viewer: Viewer, per_chat: usize) -> rusqlite::Result<Option<Initial>> {
+fn initial(c: &Connection, viewer: Viewer) -> rusqlite::Result<Option<Initial>> {
     let (me, now) = (viewer.account, viewer.now);
     let Some(account) = accounts::by_id(c, me, now)? else { return Ok(None) };
     let cursor = events::head(c, me)?;
@@ -199,15 +199,45 @@ fn initial(c: &Connection, viewer: Viewer, per_chat: usize) -> rusqlite::Result<
     for other in others {
         people.extend(person(c, me, other, now)?);
     }
-    let (mut chat_infos, mut histories) = (Vec::new(), Vec::new());
+    let mut chat_infos = Vec::new();
     for chat in &announced {
         chat_infos.extend(chat_info(c, me, chat, now)?);
-        let (rows, complete) = chats::visible(c, &chat.id, me, i64::MAX, per_chat)?;
-        histories.push((B64(chat.id), message_frames(c, &chat.id, rows, now)?, complete));
     }
     let pins = pins::all(c, me)?.into_iter().map(|(number, pin)| Pin { number, pin: Some(Blob(pin)) }).collect();
     let snapshot = Snapshot { cursor, account: account.to_frame(), people, chats: chat_infos, pins };
-    Ok(Some(Initial { snapshot, histories }))
+    let chats = announced.iter().map(|chat| (chat.id, chat.last_seq)).collect();
+    Ok(Some(Initial { snapshot, chats }))
+}
+
+/// Up to `limit` messages `viewer` sees before `before`, oldest first, cut
+/// from the oldest end once their bodies reach [`PAGE_BYTES`]; and whether
+/// nothing older is visible. `None` if the chat isn't the viewer's.
+fn history_page(
+    c: &Connection,
+    viewer: Viewer,
+    chat: &[u8; 16],
+    before: i64,
+    limit: usize,
+) -> rusqlite::Result<Option<(Vec<Message>, bool)>> {
+    if !chats::member(c, chat, viewer.account)?.is_some_and(|m| m.announced) {
+        return Ok(None);
+    }
+    let (mut rows, mut complete) = chats::visible(c, chat, viewer.account, before, limit)?;
+    let mut bytes = 0;
+    let keep = rows
+        .iter()
+        .rev()
+        .take_while(|row| {
+            let under = bytes < PAGE_BYTES;
+            bytes += row.body.len();
+            under
+        })
+        .count();
+    if keep < rows.len() {
+        rows.drain(..rows.len() - keep);
+        complete = false;
+    }
+    Ok(Some((message_frames(c, chat, rows, viewer.now)?, complete)))
 }
 
 impl Link {
@@ -264,7 +294,7 @@ impl Link {
 
     async fn send_snapshot(&mut self, viewer: Viewer) -> Flow {
         let per_chat = self.state.limits.snapshot_messages;
-        let Initial { snapshot, histories } = match self.state.db.call(move |c| initial(c, viewer, per_chat)).await {
+        let Initial { snapshot, chats } = match self.state.db.call(move |c| initial(c, viewer)).await {
             Ok(Some(initial)) => initial,
             Ok(None) => return self.internal("making a snapshot", "the account is gone").await,
             Err(err) => return self.internal("making a snapshot", err).await,
@@ -273,7 +303,15 @@ impl Link {
         if let Flow::Close = self.send(&ServerFrame::Snapshot { snapshot }).await {
             return Flow::Close;
         }
-        for (chat_id, messages, complete) in histories {
+        // One chat per call, so a big snapshot never holds the database for long.
+        for (chat, last_seq) in chats {
+            let page = self.state.db.call(move |c| history_page(c, viewer, &chat, last_seq + 1, per_chat)).await;
+            let (messages, complete) = match page {
+                Ok(Some(page)) => page,
+                Ok(None) => continue,
+                Err(err) => return self.internal("reading a chat for a snapshot", err).await,
+            };
+            let chat_id = B64(chat);
             if let Flow::Close = self.send(&ServerFrame::History { chat_id, messages, complete }).await {
                 return Flow::Close;
             }
@@ -323,17 +361,7 @@ impl Link {
         };
         let limit = (limit as usize).min(self.state.limits.snapshot_messages);
         let chat = chat_id.0;
-        let page = self
-            .state
-            .db
-            .call(move |c| -> rusqlite::Result<Option<(Vec<Message>, bool)>> {
-                if !chats::member(c, &chat, viewer.account)?.is_some_and(|m| m.announced) {
-                    return Ok(None);
-                }
-                let (rows, complete) = chats::visible(c, &chat, viewer.account, before, limit)?;
-                Ok(Some((message_frames(c, &chat, rows, viewer.now)?, complete)))
-            })
-            .await;
+        let page = self.state.db.call(move |c| history_page(c, viewer, &chat, before, limit)).await;
         match page {
             Ok(Some((messages, complete))) => self.send(&ServerFrame::History { chat_id, messages, complete }).await,
             Ok(None) => self.error(ErrorCode::ChatUnknown, "No such chat.").await,

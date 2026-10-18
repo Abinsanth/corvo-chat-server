@@ -1,8 +1,9 @@
 # The corvo-chat protocol
 
 This is what a client (the CLI, and later the website and the phone app)
-needs to talk to a corvo-chat server. It covers accounts: signing up,
-invites, signing in, devices, and recovery. The Rust types for every frame
+needs to talk to a corvo-chat server. It covers accounts (signing up,
+invites, signing in, devices, recovery) and chats (people, messages, marks,
+syncing every device, presence). The Rust types for every frame
 are in the `corvo-chat-proto` crate, which builds for WebAssembly too.
 
 ## 1. Transport
@@ -152,6 +153,7 @@ S: signed_in      {token, account (pending), copy: null}
   `signup_finish`, and shows the username next to the recovery code.
 - Keep the **token** (32 bytes) with the device id: it's how this device
   resumes. The server keeps only its SHA-256.
+- After any `signed_in` of an active account, send `sync` (section 11).
 - If `signup_finish` gets `try_again`, start over with `signup_start`.
 
 ### Invite and activate
@@ -294,7 +296,171 @@ The connection then closes.
 - **Recovery:** 5 tries per account per hour (`rate_limited`).
 - **Signup:** 1 per device id and 3 per IP per day (`signup_limit`).
 
-## 7. Every frame
+## 7. People
+
+Each account has its own **row** about each other account it knows. The
+other side never sees your row directly, only its effects:
+
+| Your row about them | You may | They see your display name | They see your marks (`✓`, `✓✓`) | Online status |
+|---|---|---|---|---|
+| none (a stranger) | message them, which asks them | no | no | no |
+| `asked` (you messaged first) | message them | yes | no | no |
+| `request` (they messaged first) | `accept`, `reject`, `block` | no | no | no |
+| `contact` | message, `remove`, `block` | yes | yes | yes, if they count you as a contact too |
+| `blocked` | `unblock` | no | no | no |
+
+- **`lookup {number}`** → `found {number, public_keys}`: the public keys
+  only, never the display name. At most 30 lookups an hour. Your own
+  number, a pending account or an unknown number gets `number_unknown`.
+- Every frame that finds out whether a number exists counts as a lookup:
+  a chat's first message, and `accept`, `reject`, `block`, `unblock` or
+  `remove` for a number you have no row about. Past the limit they get
+  `rate_limited` too.
+- **A first message** to a stranger makes your row `asked` and theirs
+  `request`. At most 20 open requests per account, with 20 messages each;
+  beyond that, messages are **withheld** (see Sending).
+- **Two people asking each other** (you message someone whose row about you
+  is `asked`) become contacts.
+- **`accept {number}`:** both become contacts; they learn your name, and
+  your marks so far appear at once.
+- **`reject {number}`:** your row goes, and your side of the chat is
+  cleared. They aren't told; their next message is a new request.
+- **`block {number}`:** nothing from them reaches you, and they aren't told
+  (they see you offline). **`unblock`** makes them a stranger again.
+- **`remove {number, clear_history}`:** your row goes, and with
+  `clear_history` your side of the chat is cleared. If they message again,
+  it's a new request.
+- **Activation by invite** makes the inviter and the new account contacts.
+- These answer only with events (a `person` event to every device of
+  yours); a refusal is an `error`.
+
+## 8. Chats and keys
+
+- One chat per pair of accounts. Its **chat id** is 16 random bytes the
+  creating client makes, since messages use it before the server has seen
+  the chat.
+- The **chat key** (32 random bytes) is sealed separately to each member's
+  X25519 key. The server stores both **sealed copies** as they come (at
+  most 1 024 bytes each) and never opens them.
+- The creator signs, with its Ed25519 key, the bytes of
+  `corvo-chat chat v1` (ASCII) followed by: the chat id; the creator's
+  number as 10 ASCII digits; the other number the same way; then each
+  sealed copy (the creator's first) as a 2-byte big-endian length and its
+  bytes. The server checks the signature at creation; clients check it too.
+- Each message has a 16-byte **message id** from the sender (a ULID), and
+  its associated data is `chat id ‖ sender number ‖ message id`.
+- A message body is at most **64 KiB** of ciphertext; a larger one fails as
+  `bad_frame`.
+
+## 9. Sending
+
+```
+C: send      {chat_id, msg_id, body, new_chat: {number, my_key, their_key, signature} or null}
+S: sent      {chat_id, msg_id, seq, sent_at}
+   not_sent  {chat_id, msg_id, code, message}
+```
+- `new_chat` goes with the chat's first message only. If the two already
+  have a chat (both started one at the same moment), the answer is
+  `not_sent` with `chat_exists`, and the existing chat arrives as an event:
+  encrypt the message again with its key and send it there.
+- **Resending** after a reconnect (the same `msg_id` in the same chat)
+  returns the first `sent` and stores nothing new. Messages marked `○` can
+  always be resent.
+- `seq` numbers a chat's messages from 1.
+- **Withheld:** a message to someone who blocked you, or beyond the request
+  limits, still gets `sent`, but never reaches them. It stays `·`.
+- **Refusals** (`✗`): `chat_unknown`, `number_unknown`, `not_allowed`
+  (`Accept the request first.`, `Unblock them first.`), `rate_limited`
+  (60 messages a minute; 20 new people a day), `bad_frame` (a bad
+  signature, a taken chat id).
+
+## 10. Marks
+
+```
+C: received  {chat_id, through}
+C: read      {chat_id, through}
+```
+- A device sends `received` once it has the messages through `through`, and
+  `read` once they're read. Neither gets a reply; both only move forward,
+  and `read` also counts as received.
+- The other side's cursors come as `marks {received_through,
+  read_through}`: the first device to receive makes your message `✓`, a
+  read makes it `✓✓`.
+- Marks reach you only while the other side has you as a contact, so a
+  request stays `·`, even when it's been read. On accept, the marks so far
+  arrive at once.
+- A `read` also reaches your own other devices as a `read` event, so they
+  clear the unread count.
+- **Known limit:** marks are cursors. A message withheld earlier (you were
+  blocked, or over the request limits) still sits below them, so if the
+  other side later accepts you and reads past it, it shows `✓✓` though it
+  never reached them.
+
+## 11. Sync
+
+Every change to an account goes into its **event log**, numbered from 1.
+Each event carries the thing's current state, so applying an event twice
+does no harm.
+
+```
+C: sync     {cursor}                  the last seq this device has
+S: events   {events, cursor}          pages of the log after it
+S: synced   {cursor}
+S: presence {number, online: true}    one per contact online
+S: events   {events, cursor}          live, from then on
+```
+- **Right after `signed_in`, send `sync`.** No events or presence arrive
+  before it.
+- A page holds at most 100 events, or stops once its message bodies reach
+  512 KiB. `cursor` is the last seq the frame covers; events you may no
+  longer see (a cleared message) are left out, but the cursor still moves
+  past them. Keep the cursor only after handling a whole frame.
+- **A new device** sends `sync {cursor: null}` and gets
+  `snapshot {cursor, account, people, chats, pins}`, then one
+  `history {chat_id, messages, complete}` per chat with its latest 50
+  messages, then `synced`. A cursor the log never reached (a restored
+  server) gets the same.
+- **Older messages:** `history {chat_id, before, limit}` (at most 50) →
+  `history {chat_id, messages, complete}`, oldest first. `complete` means
+  there's nothing older to show.
+
+Event kinds (`{"seq": 7, "event": {"kind": …}}`):
+
+| `kind` | Fields | When |
+|---|---|---|
+| `message` | `message` | A message in one of your chats, yours included |
+| `chat` | `chat` | A chat appeared for you |
+| `person` | `person` | Your row about someone changed, or what you may see of them |
+| `marks` | `chat_id, marks` | The other side's cursors moved |
+| `read` | `chat_id, read_through` | You read further on another device |
+| `cleared` | `chat_id, cleared_through` | Your side of a chat was cleared up to here |
+| `profile` | `account` | Your display name changed |
+| `devices` | `devices` | A device signed in or out, or was renamed |
+| `pin` | `pin` | A pinned key changed |
+
+A `chat` holds both sealed copies (`keys`, the creator's first), the
+signature, `last_seq`, your own `read_through` and `cleared_through`, and the
+other side's `marks` when they share them. A `person` holds the number, the
+display name when they share it, their public keys, and your `relation`.
+
+## 12. Presence, pins and names
+
+- **Presence:** `presence {number, online}` whenever a mutual contact's
+  first device connects or last one leaves. There's no "last seen".
+- **Pins:** `set_pin {pin: {number, pin}}` stores your pinned keys for a
+  number, encrypted with your data key (at most 1 024 bytes); `pin: null`
+  removes them. Every device of yours gets a `pin` event, and a snapshot
+  holds them all.
+- **Display name:** `set_display_name {display_name}` → a `profile` event
+  on your devices and a `person` event for everyone who sees your name,
+  except someone who blocked, rejected or removed you.
+- **Device name:** `rename_device {name}` renames this device → a `devices`
+  event on all your devices.
+- **Limits:** at most 60 changes an hour, counting display names, device
+  names, pins, `block` and `unblock` (`rate_limited`, `Too many changes.
+  Wait an hour.`), and at most 500 pinned keys (`not_allowed`).
+
+## 13. Every frame
 
 ### Client frames
 
@@ -320,6 +486,17 @@ The connection then closes.
 | `list_devices` | Active | `{"type":"list_devices"}` |
 | `sign_out_device` | Active | `{"type":"sign_out_device","id":"<b64:16>"}` |
 | `sign_out` | Signed in | `{"type":"sign_out"}` |
+| `sync` | Active | `{"type":"sync","cursor":41}` |
+| `history` | Active | `{"type":"history","chat_id":"<b64:16>","before":71,"limit":50}` |
+| `lookup` | Active | `{"type":"lookup","number":"4829105572"}` |
+| `send` | Active | `{"type":"send","chat_id":"<b64:16>","msg_id":"<b64:16>","body":"<b64>","new_chat":null}` |
+| `received` | Active | `{"type":"received","chat_id":"<b64:16>","through":12}` |
+| `read` | Active | `{"type":"read","chat_id":"<b64:16>","through":12}` |
+| `accept` / `reject` / `block` / `unblock` | Active | `{"type":"accept","number":"4829105572"}` |
+| `remove` | Active | `{"type":"remove","number":"4829105572","clear_history":false}` |
+| `set_display_name` | Active | `{"type":"set_display_name","display_name":"Abin"}` |
+| `rename_device` | Active | `{"type":"rename_device","name":"work laptop"}` |
+| `set_pin` | Active | `{"type":"set_pin","pin":{"number":"4829105572","pin":"<b64>"}}` |
 
 ### Server frames
 
@@ -340,6 +517,14 @@ The connection then closes.
 | `devices` | `{"type":"devices","devices":[{"id":"<b64:16>","kind":"cli","name":"abins-laptop","first_seen":1800000000,"last_used":1800000000,"this_device":true}]}` |
 | `signed_out` | `{"type":"signed_out","reason":"by_another_device"}`. Reasons: `this_device`, `by_another_device`, `password_changed`, `recovered`, `expired`. The connection closes after it |
 | `error` | `{"type":"error","code":"locked","message":"Locked for 15 more minutes","until":1800000900}` |
+| `snapshot` | `{"type":"snapshot","snapshot":{"cursor":41,"account":{…},"people":[…],"chats":[…],"pins":[…]}}` |
+| `events` | `{"type":"events","events":[{"seq":42,"event":{"kind":"read","chat_id":"<b64:16>","read_through":12}}],"cursor":42}` |
+| `synced` | `{"type":"synced","cursor":42}` |
+| `history` | `{"type":"history","chat_id":"<b64:16>","messages":[{"chat_id":"<b64:16>","seq":12,"msg_id":"<b64:16>","from":"4829105572","body":"<b64>","sent_at":1800000000}],"complete":false}` |
+| `found` | `{"type":"found","number":"4829105572","public_keys":{…}}` |
+| `sent` | `{"type":"sent","chat_id":"<b64:16>","msg_id":"<b64:16>","seq":12,"sent_at":1800000000}` |
+| `not_sent` | `{"type":"not_sent","chat_id":"<b64:16>","msg_id":"<b64:16>","code":"rate_limited","message":"Too many messages. Slow down."}` |
+| `presence` | `{"type":"presence","number":"4829105572","online":true}` |
 
 ### Error codes
 
@@ -347,14 +532,14 @@ The `message` is meant to be shown as it is.
 
 | Code | When | Message |
 |---|---|---|
-| `bad_frame` | Not a frame, a frame out of order, or bytes that don't parse | — |
+| `bad_frame` | Not a frame, a frame out of order, bytes that don't parse, a body over 64 KiB, or a chat signature that doesn't check out | — |
 | `update_required` | `hello` with an old protocol version; the connection closes | `run /update` |
 | `not_signed_in` | A frame that needs a session, before signing in | `sign in first` |
 | `already_signed_in` | A sign-up, sign-in or resume on a signed-in connection | `already signed in` |
 | `not_active` | A pending account sending anything but `activate` or `sign_out` | `the account is waiting for its invite code` |
 | `bad_username` | A base that breaks the rules | why |
-| `bad_display_name` | A display name that breaks the rules | why |
-| `bad_device` | A device name that breaks the rules | why |
+| `bad_display_name` | A display name that breaks the rules (signup or `set_display_name`) | why |
+| `bad_device` | A device name that breaks the rules (signing in or `rename_device`) | why |
 | `bad_public_keys` | The signature doesn't check out | `those keys don't check out` |
 | `try_again` | Someone took the username or number in the moment between the offer and the finish | `Please sign up again.` |
 | `signup_limit` | Too many signups from this device or IP today | `Only one new account per device per day.` / `Too many new accounts from this network today.` |
@@ -364,11 +549,14 @@ The `message` is meant to be shown as it is.
 | `locked_forever` | 10 wrong passwords | `Locked. Sign in with your recovery code` |
 | `sign_in_limit` | The 6th sign-in today | `Too many sign-ins today, try again tomorrow.` |
 | `device_limit` | A new device beyond the limit | `Maximum devices reached (3). Sign out a device first.` |
-| `rate_limited` | Too many unknown usernames from this IP, or recovery tries for this account, in the last hour | `Too many tries. Wait an hour.` |
+| `rate_limited` | Too many unknown usernames from this IP, or recovery tries for this account, in the last hour; 30 lookups an hour; 60 messages a minute; 20 new people a day | `Too many tries. Wait an hour.`, … |
 | `session_unknown` | `resume` with a token that's gone or a different device id | `This device was signed out.` |
 | `not_pending` | Inviting a number that isn't pending | `That number isn't waiting for an invite.` |
 | `code_wrong` | A wrong invite code | `That code is wrong.` |
 | `code_dead` | No code, or 5 wrong tries used it up | `That code no longer works. Ask for a new invite.` |
 | `too_many_invites` | A 6th open invite | `You have too many open invites.` |
-| `not_allowed` | `reregister` or a secret change without a reauth in the last 5 minutes | `enter your password again first` |
+| `not_allowed` | `reregister` or a secret change without a reauth in the last 5 minutes; a message to someone you have a request from or blocked; an accept, reject, unblock or remove that doesn't fit your row | `enter your password again first`, `Accept the request first.`, … |
 | `internal` | A server fault; try again | `server error, try again` |
+| `number_unknown` | A number that isn't an active account, or your own | `That number isn't on corvo-chat.` |
+| `chat_unknown` | A chat that doesn't exist or isn't yours | `No such chat.` |
+| `chat_exists` | A second chat for the same two people (in `not_sent`) | `You already have a chat with them.` |
