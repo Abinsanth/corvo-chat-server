@@ -312,6 +312,10 @@ other side never sees your row directly, only its effects:
 - **`lookup {number}`** → `found {number, public_keys}`: the public keys
   only, never the display name. At most 30 lookups an hour. Your own
   number, a pending account or an unknown number gets `number_unknown`.
+- Every frame that finds out whether a number exists counts as a lookup:
+  a chat's first message, and `accept`, `reject`, `block`, `unblock` or
+  `remove` for a number you have no row about. Past the limit they get
+  `rate_limited` too.
 - **A first message** to a stranger makes your row `asked` and theirs
   `request`. At most 20 open requests per account, with 20 messages each;
   beyond that, messages are **withheld** (see Sending).
@@ -387,6 +391,10 @@ C: read      {chat_id, through}
   arrive at once.
 - A `read` also reaches your own other devices as a `read` event, so they
   clear the unread count.
+- **Known limit:** marks are cursors. A message withheld earlier (you were
+  blocked, or over the request limits) still sits below them, so if the
+  other side later accepts you and reads past it, it shows `✓✓` though it
+  never reached them.
 
 ## 11. Sync
 
@@ -444,9 +452,13 @@ display name when they share it, their public keys, and your `relation`.
   removes them. Every device of yours gets a `pin` event, and a snapshot
   holds them all.
 - **Display name:** `set_display_name {display_name}` → a `profile` event
-  on your devices and a `person` event for everyone who sees your name.
+  on your devices and a `person` event for everyone who sees your name,
+  except someone who blocked, rejected or removed you.
 - **Device name:** `rename_device {name}` renames this device → a `devices`
   event on all your devices.
+- **Limits:** at most 60 changes an hour, counting display names, device
+  names, pins, `block` and `unblock` (`rate_limited`, `Too many changes.
+  Wait an hour.`), and at most 500 pinned keys (`not_allowed`).
 
 ## 13. Every frame
 

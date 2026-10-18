@@ -390,3 +390,15 @@ async fn acks_for_a_chat_i_am_not_in_are_refused() {
     s.send(&ClientFrame::Read { chat_id, through: 1 }).await;
     assert_error(s.recv().await, ErrorCode::ChatUnknown);
 }
+
+#[tokio::test]
+async fn refused_first_message_leaves_no_chat() {
+    let server =
+        start_server_with(Limits { signups_per_ip_day: 1_000, new_people_per_day: 0, ..Limits::default() }).await;
+    let (abin, mut a, rahul, _b) = strangers(&server).await;
+    let chat_id = random_id();
+    let refused = a.send_body(&chat_id, b"x".to_vec(), Some(new_chat(&abin, &chat_id, rahul.number))).await;
+    assert_not_sent(refused, ErrorCode::RateLimited);
+    assert_eq!(count(&server, "SELECT COUNT(*) FROM chats WHERE ?1 = 1", 1).await, 0);
+    assert!(a.quiet().await, "no chat event");
+}

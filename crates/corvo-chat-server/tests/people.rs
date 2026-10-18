@@ -194,3 +194,74 @@ async fn two_people_asking_each_other_become_contacts() {
     assert_eq!(a.next_person(rahul.number).await.relation, Relation::Contact);
     assert_eq!(b.next_person(abin.number).await.relation, Relation::Contact);
 }
+
+#[tokio::test]
+async fn name_changes_never_reach_someone_who_blocked_or_rejected_you() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = strangers(&server).await;
+    let (sam, mut s) = Person::active(&server, "sam").await;
+    s.sync_from(Some(0)).await;
+    first_message(&mut a, &abin, rahul.number).await;
+    first_message(&mut a, &abin, sam.number).await;
+    act(&mut b, ClientFrame::Block { number: abin.number }).await;
+    act(&mut s, ClientFrame::Reject { number: abin.number }).await;
+    b.drain().await;
+    s.drain().await;
+    a.send(&ClientFrame::SetDisplayName { display_name: "I can still reach you".into() }).await;
+    assert!(b.quiet().await, "the blocker hears nothing");
+    assert!(s.quiet().await, "the one who rejected hears nothing");
+}
+
+#[tokio::test]
+async fn a_new_request_after_remove_gets_its_twenty_messages() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = contacts(&server).await;
+    let chat_id = first_message(&mut a, &abin, rahul.number).await;
+    for _ in 0..24 {
+        a.send_body(&chat_id, b"x".to_vec(), None).await;
+    }
+    act(&mut b, ClientFrame::Remove { number: abin.number, clear_history: false }).await;
+    for _ in 0..3 {
+        a.send_body(&chat_id, b"again".to_vec(), None).await;
+    }
+    let withheld = server
+        .state
+        .db
+        .call(|c| c.query_row("SELECT COUNT(*) FROM messages WHERE withheld = 1", [], |r| r.get::<_, i64>(0)).unwrap())
+        .await;
+    assert_eq!(withheld, 0);
+}
+
+#[tokio::test]
+async fn number_checks_count_as_lookups() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, _b) = strangers(&server).await;
+    for _ in 0..30 {
+        a.send(&ClientFrame::Lookup { number: rahul.number }).await;
+        assert!(matches!(a.recv().await, ServerFrame::Found { .. }));
+    }
+    let unknown = Number::from_body(999_999_999).unwrap();
+    for frame in [accept(unknown), ClientFrame::Block { number: unknown }, ClientFrame::Block { number: rahul.number }]
+    {
+        act(&mut a, frame).await;
+        assert_error(a.recv().await, ErrorCode::RateLimited);
+    }
+    let chat_id = common::chat::random_id();
+    let new_chat = common::chat::new_chat(&abin, &chat_id, unknown);
+    match a.send_body(&chat_id, b"x".to_vec(), Some(new_chat)).await {
+        ServerFrame::NotSent { code, .. } => assert_eq!(code, ErrorCode::RateLimited),
+        other => panic!("expected not_sent, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn people_who_ask_each_other_see_each_other_online() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = strangers(&server).await;
+    let chat_id = first_message(&mut a, &abin, rahul.number).await;
+    act(&mut b, ClientFrame::Reject { number: abin.number }).await;
+    wait_for(&mut b, |e| matches!(e, EventBody::Cleared { .. })).await;
+    b.send_body(&chat_id, b"hi".to_vec(), None).await;
+    assert_eq!(a.next_presence().await, (rahul.number, true));
+    assert_eq!(b.next_presence().await, (abin.number, true));
+}

@@ -1,7 +1,8 @@
 //! Rate-limit bookkeeping: one row per try, counted inside a time window.
 //!
 //! Kinds: `signup_device` (key: base64 device id), `signup_ip`, `sign_in`
-//! (key: account id), `recovery` (account id) and `unknown_user` (IP).
+//! (key: account id), `recovery` (account id), `unknown_user` (IP), and
+//! per account id `lookup`, `message`, `new_person` and `change`.
 
 use rusqlite::{Connection, params};
 

@@ -237,3 +237,22 @@ async fn offline_device_catches_up_to_the_same_state() {
     assert_eq!(caught_up, vec![6, 7]);
     assert_eq!(synced.cursor, last);
 }
+
+#[tokio::test]
+async fn big_histories_are_split_by_bytes() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = contacts(&server).await;
+    let chat_id = random_id();
+    a.send_body(&chat_id, vec![1; 60_000], Some(new_chat(&abin, &chat_id, rahul.number))).await;
+    for _ in 2..=12 {
+        a.send_body(&chat_id, vec![1; 60_000], None).await;
+    }
+    let (mut phone, _) = rahul.sign_in(&server, &device("phone")).await;
+    let synced = phone.sync_from(None).await;
+    let (_, messages, complete) = &synced.histories[0];
+    assert!(!complete && messages.len() < 12, "{} messages in one frame", messages.len());
+    assert_eq!(messages.last().map(|m| m.seq), Some(12), "the newest come first");
+    let (older, done) = history(&mut b, &chat_id, messages[0].seq, 50).await;
+    assert!(older.len() < 12 && older.last() == Some(&(messages[0].seq - 1)));
+    let _ = done;
+}

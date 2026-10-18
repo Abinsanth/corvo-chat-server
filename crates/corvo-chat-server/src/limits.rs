@@ -24,6 +24,10 @@ pub struct Limits {
     /// Messages per chat in a new device's snapshot, and the most one
     /// `history` page holds.
     pub snapshot_messages: usize,
+    /// Display name, device name, pin, block and unblock changes per account per hour.
+    pub changes_per_hour: u32,
+    /// Pinned keys per account.
+    pub max_pins: i64,
 }
 
 impl Default for Limits {
@@ -49,6 +53,8 @@ impl Default for Limits {
             open_requests: 20,
             request_messages: 20,
             snapshot_messages: 50,
+            changes_per_hour: 60,
+            max_pins: 500,
         }
     }
 }

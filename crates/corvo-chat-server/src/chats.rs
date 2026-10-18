@@ -32,6 +32,8 @@ pub struct MemberRow {
     pub cleared_through: i64,
     /// The chat has been in this account's event log.
     pub announced: bool,
+    /// The first seq of this side's current request, if it ever had one.
+    pub request_from: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,7 +127,7 @@ pub fn between(c: &Connection, a: i64, b: i64) -> rusqlite::Result<Option<ChatRo
 
 pub fn member(c: &Connection, id: &[u8; 16], account: i64) -> rusqlite::Result<Option<MemberRow>> {
     c.query_row(
-        "SELECT account_id, sealed_key, received_through, read_through, cleared_through, announced
+        "SELECT account_id, sealed_key, received_through, read_through, cleared_through, announced, request_from
          FROM chat_members WHERE chat_id = ?1 AND account_id = ?2",
         params![id.as_slice(), account],
         |r| {
@@ -136,6 +138,7 @@ pub fn member(c: &Connection, id: &[u8; 16], account: i64) -> rusqlite::Result<O
                 read_through: r.get(3)?,
                 cleared_through: r.get(4)?,
                 announced: r.get(5)?,
+                request_from: r.get(6)?,
             })
         },
     )
@@ -262,15 +265,25 @@ pub fn visible(
     Ok((rows, complete))
 }
 
-/// How many of `sender`'s messages `viewer` sees since clearing: what a
-/// request has used of its message limit.
-pub fn visible_from_since_clear(c: &Connection, id: &[u8; 16], sender: i64, viewer: i64) -> rusqlite::Result<i64> {
-    let cleared = member(c, id, viewer)?.map_or(0, |m| m.cleared_through);
+/// How many of `sender`'s messages `viewer` sees in the request it has now:
+/// what that request has used of its message limit.
+pub fn request_messages(c: &Connection, id: &[u8; 16], sender: i64, viewer: i64) -> rusqlite::Result<i64> {
+    let (cleared, from) = member(c, id, viewer)?.map_or((0, 0), |m| (m.cleared_through, m.request_from));
     c.query_row(
-        "SELECT COUNT(*) FROM messages WHERE chat_id = ?1 AND sender_id = ?2 AND withheld = 0 AND seq > ?3",
-        params![id.as_slice(), sender, cleared],
+        "SELECT COUNT(*) FROM messages
+         WHERE chat_id = ?1 AND sender_id = ?2 AND withheld = 0 AND seq > ?3 AND seq >= ?4",
+        params![id.as_slice(), sender, cleared, from],
         |r| r.get(0),
     )
+}
+
+/// A request to `viewer` starts at `seq`: its message limit counts from there.
+pub fn start_request(c: &Connection, id: &[u8; 16], viewer: i64, seq: i64) -> rusqlite::Result<()> {
+    c.execute(
+        "UPDATE chat_members SET request_from = ?3 WHERE chat_id = ?1 AND account_id = ?2",
+        params![id.as_slice(), viewer, seq],
+    )?;
+    Ok(())
 }
 
 /// The highest seq `through` may name: the chat's last.
@@ -410,7 +423,11 @@ mod tests {
         send(&c, 1, 3, false);
         send(&c, 1, 4, true);
         send(&c, 2, 5, false);
-        assert_eq!(visible_from_since_clear(&c, &[1; 16], 1, 2).unwrap(), 1);
+        assert_eq!(request_messages(&c, &[1; 16], 1, 2).unwrap(), 1);
+        // A request starting at seq 6 counts only from there.
+        send(&c, 1, 6, false);
+        start_request(&c, &[1; 16], 2, 6).unwrap();
+        assert_eq!(request_messages(&c, &[1; 16], 1, 2).unwrap(), 1);
     }
 
     #[test]

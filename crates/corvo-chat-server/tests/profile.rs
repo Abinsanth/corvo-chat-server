@@ -127,3 +127,35 @@ async fn pins_sync_to_the_other_device_and_into_the_snapshot() {
         assert_eq!(pins, pin.pin.is_some().then(|| pin.clone()).into_iter().collect::<Vec<_>>());
     }
 }
+
+#[tokio::test]
+async fn profile_changes_are_rate_limited() {
+    let server = start_server().await;
+    let (_abin, mut a) = Person::active(&server, "abin").await;
+    for n in 0..60 {
+        a.send(&ClientFrame::RenameDevice { name: format!("laptop {n}") }).await;
+    }
+    a.send(&ClientFrame::SetDisplayName { display_name: "one too many".into() }).await;
+    assert_error(a.recv().await, ErrorCode::RateLimited);
+    server.state.clock.advance(3_600);
+    a.send(&ClientFrame::SetDisplayName { display_name: "fine now".into() }).await;
+    assert!(a.quiet().await, "no error");
+}
+
+#[tokio::test]
+async fn pins_are_capped() {
+    use common::client::start_server_with;
+    use corvo_chat_proto::Number;
+    use corvo_chat_server::limits::Limits;
+    let server = start_server_with(Limits { signups_per_ip_day: 1_000, max_pins: 2, ..Limits::default() }).await;
+    let (_abin, mut a) = Person::active(&server, "abin").await;
+    let number = |n: u32| Number::from_body(100_000_000 + n).unwrap();
+    for n in 0..2 {
+        a.send(&ClientFrame::SetPin { pin: Pin { number: number(n), pin: Some(Blob(vec![1])) } }).await;
+    }
+    a.send(&ClientFrame::SetPin { pin: Pin { number: number(2), pin: Some(Blob(vec![1])) } }).await;
+    assert_error(a.recv().await, ErrorCode::NotAllowed);
+    // Changing one that's there is fine.
+    a.send(&ClientFrame::SetPin { pin: Pin { number: number(0), pin: Some(Blob(vec![2])) } }).await;
+    assert!(a.quiet().await, "no error");
+}
