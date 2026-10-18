@@ -6,7 +6,7 @@
 use corvo_chat_proto::{
     Number,
     chat::{Pin, Relation},
-    frames::ErrorCode,
+    frames::{ErrorCode, ServerFrame},
     names::{check_device_name, check_display_name},
 };
 use rusqlite::Connection;
@@ -39,6 +39,9 @@ enum Seen {
 
 /// A refusal's code and message.
 type Refusal = (ErrorCode, &'static str);
+
+/// The window of the daily report limit.
+const DAY: i64 = 86_400;
 
 /// The refusal once the hour's changes are used up.
 const CHANGE_LIMIT: &str = "Too many changes. Wait an hour.";
@@ -292,5 +295,78 @@ impl Link {
             Ok(Ok(()))
         })
         .await
+    }
+}
+
+/// The longest report reason, in characters.
+const REASON_MAX: usize = 200;
+
+/// A report's reason, trimmed; an empty one is none.
+fn check_reason(reason: Option<String>) -> Result<Option<String>, &'static str> {
+    let Some(reason) = reason.map(|r| r.trim().to_string()).filter(|r| !r.is_empty()) else { return Ok(None) };
+    if reason.chars().count() > REASON_MAX {
+        return Err("That reason is too long.");
+    }
+    if reason.chars().any(char::is_control) {
+        return Err("That reason has characters that aren't allowed.");
+    }
+    Ok(Some(reason))
+}
+
+impl Link {
+    /// Reports someone for the admin, and blocks them too if asked.
+    pub(super) async fn report(&mut self, number: Number, reason: Option<String>, block: bool) -> Flow {
+        let Conn::SignedIn { account_id: me, .. } = self.conn else {
+            return self.error(ErrorCode::NotSignedIn, "sign in first").await;
+        };
+        let reason = match check_reason(reason) {
+            Ok(reason) => reason,
+            Err(message) => return self.error(ErrorCode::BadFrame, message).await,
+        };
+        let (now, hub, limits) = (self.state.clock.now(), self.state.hub.clone(), self.state.limits.clone());
+        let done = self
+            .state
+            .db
+            .call(move |c| -> rusqlite::Result<Result<(), Refusal>> {
+                let other = accounts::active_by_number(c, number, now)?.filter(|row| row.id != me);
+                let stranger = match &other {
+                    Some(other) => relations::get(c, me, other.id)? == Relation::None,
+                    None => true,
+                };
+                if stranger && !charge_lookup(c, me, now, &limits)? {
+                    return Ok(Err((ErrorCode::RateLimited, LOOKUP_LIMIT)));
+                }
+                let Some(other) = other else {
+                    return Ok(Err((ErrorCode::NumberUnknown, "That number isn't on corvo-chat.")));
+                };
+                let key = me.to_string();
+                if attempts::count_since(c, "report", &key, now - DAY + 1)? >= i64::from(limits.reports_per_day) {
+                    return Ok(Err((ErrorCode::RateLimited, "Too many reports today.")));
+                }
+                let mine = accounts::by_id(c, me, now)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                let mut touched = Touched::default();
+                let tx = c.transaction()?;
+                attempts::note(&tx, "report", &key, now)?;
+                crate::reports::add(&tx, Some(me), other.id, reason.as_deref(), now)?;
+                let mut seen = Seen::Unchanged;
+                if block && relations::get(&tx, me, other.id)? != Relation::Blocked {
+                    seen = match change(&tx, me, other.id, Change::Block, now, &mut touched)? {
+                        Ok(seen) => seen,
+                        Err(refusal) => return Ok(Err(refusal)),
+                    };
+                }
+                tx.commit()?;
+                touched.poke(&hub);
+                if let Seen::Hidden = seen {
+                    announce_pair(&hub, (me, mine.number), (other.id, other.number), false);
+                }
+                Ok(Ok(()))
+            })
+            .await;
+        match done {
+            Ok(Ok(())) => self.send(&ServerFrame::Reported).await,
+            Ok(Err((code, message))) => self.error(code, message).await,
+            Err(err) => self.internal("reporting", err).await,
+        }
     }
 }

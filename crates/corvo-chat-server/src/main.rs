@@ -62,6 +62,33 @@ enum Command {
         #[command(flatten)]
         dir: DataDir,
     },
+    /// List the accounts that have been reported.
+    Stats {
+        #[command(flatten)]
+        dir: DataDir,
+    },
+    /// Show who invited an account and whom it invited.
+    Tree {
+        /// The account's number.
+        number: String,
+        #[command(flatten)]
+        dir: DataDir,
+    },
+    /// Ban accounts: sign out their devices and refuse them from now on.
+    Ban {
+        /// The accounts' numbers.
+        #[arg(required = true)]
+        numbers: Vec<String>,
+        #[command(flatten)]
+        dir: DataDir,
+    },
+    /// Lift a ban.
+    Unban {
+        /// The account's number.
+        number: String,
+        #[command(flatten)]
+        dir: DataDir,
+    },
 }
 
 #[tokio::main]
@@ -98,6 +125,31 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Invite { number, dir } => {
             println!("{}", admin::invite(&dir.data_dir, &number)?);
+            Ok(())
+        }
+        Command::Stats { dir } => {
+            println!("{}", admin::stats(&dir.data_dir)?);
+            Ok(())
+        }
+        Command::Tree { number, dir } => {
+            print!("{}", admin::tree(&dir.data_dir, &number)?);
+            Ok(())
+        }
+        Command::Ban { numbers, dir } => {
+            let (done, errors) = admin::ban(&dir.data_dir, &numbers)?;
+            for line in done {
+                println!("{line}");
+            }
+            for error in &errors {
+                eprintln!("{error}");
+            }
+            if !errors.is_empty() {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Command::Unban { number, dir } => {
+            println!("{}", admin::unban(&dir.data_dir, &number)?);
             Ok(())
         }
     }

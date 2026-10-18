@@ -89,3 +89,53 @@ async fn unbanned_account_can_sign_in_again() {
     server.state.db.call(move |c| accounts::unban(c, id).unwrap()).await;
     abin.sign_in(&server, &device("phone")).await;
 }
+
+async fn report(
+    client: &mut Client,
+    number: corvo_chat_proto::Number,
+    reason: Option<&str>,
+    block: bool,
+) -> ServerFrame {
+    client.send(&ClientFrame::Report { number, reason: reason.map(String::from), block }).await;
+    client.recv().await
+}
+
+#[tokio::test]
+async fn report_is_stored_and_can_block() {
+    use corvo_chat_proto::chat::Relation;
+    let server = start_server().await;
+    let (abin, _a, rahul, mut b) = contacts(&server).await;
+    assert_eq!(report(&mut b, abin.number, Some("  spam links  "), true).await, ServerFrame::Reported);
+    assert_eq!(b.next_person(abin.number).await.relation, Relation::Blocked);
+    let (a_id, b_id) = (abin.id(&server).await, rahul.id(&server).await);
+    let row: (i64, Option<String>) = server
+        .state
+        .db
+        .call(move |c| {
+            c.query_row("SELECT reporter_id, reason FROM reports WHERE reported_id = ?1", [a_id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+        })
+        .await;
+    assert_eq!(row, (b_id, Some("spam links".into())));
+}
+
+#[tokio::test]
+async fn long_reason_is_refused() {
+    let server = start_server().await;
+    let (abin, _a, _rahul, mut b) = contacts(&server).await;
+    let reason = "x".repeat(201);
+    assert_error(report(&mut b, abin.number, Some(&reason), false).await, ErrorCode::BadFrame);
+    assert_eq!(report(&mut b, abin.number, Some(&"é".repeat(200)), false).await, ServerFrame::Reported);
+}
+
+#[tokio::test]
+async fn eleventh_report_in_a_day_is_refused() {
+    let server = start_server().await;
+    let (abin, _a, _rahul, mut b) = contacts(&server).await;
+    for _ in 0..10 {
+        assert_eq!(report(&mut b, abin.number, None, false).await, ServerFrame::Reported);
+    }
+    assert_error(report(&mut b, abin.number, None, false).await, ErrorCode::RateLimited);
+}

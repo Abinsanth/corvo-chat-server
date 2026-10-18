@@ -306,8 +306,9 @@ impl Link {
             F::SetDisplayName { display_name } => self.set_display_name(display_name).await,
             F::RenameDevice { name } => self.rename_device(name).await,
             F::SetPin { pin } => self.set_pin(pin).await,
-            // Reports and deleting an account arrive in the next changes.
-            F::Report { .. } | F::DeleteAccount => self.error(ErrorCode::BadFrame, "not supported yet").await,
+            F::Report { number, reason, block } => self.report(number, reason, block).await,
+            // Deleting an account arrives in the next change.
+            F::DeleteAccount => self.error(ErrorCode::BadFrame, "not supported yet").await,
         }
     }
 
