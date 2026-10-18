@@ -4,7 +4,7 @@
 
 use corvo_chat_proto::{
     B64, Blob, Body, Number,
-    chat::{ChatInfo, Event, EventBody, Marks, Message, Person, Pin, SealedKey},
+    chat::{ChatInfo, Event, EventBody, Marks, Message, Person, Pin, SealedKey, Snapshot},
     frames::{ErrorCode, ServerFrame},
 };
 use rusqlite::Connection;
@@ -161,6 +161,55 @@ fn page(c: &Connection, viewer: Viewer, after: i64, upto: Option<i64>) -> rusqli
     Ok(last.map(|last| (shown, last)))
 }
 
+/// What a new device starts from: the snapshot, and the latest messages of
+/// each chat (oldest first, and whether that's all of them).
+struct Initial {
+    snapshot: Snapshot,
+    histories: Vec<(B64<16>, Vec<Message>, bool)>,
+}
+
+/// Stored messages as frames, dropping any whose sender is gone.
+fn message_frames(
+    c: &Connection,
+    chat_id: &[u8; 16],
+    rows: Vec<MessageRow>,
+    now: i64,
+) -> rusqlite::Result<Vec<Message>> {
+    let mut messages = Vec::with_capacity(rows.len());
+    for row in rows {
+        messages.extend(message_frame(c, chat_id, row, now)?);
+    }
+    Ok(messages)
+}
+
+fn initial(c: &Connection, viewer: Viewer, per_chat: usize) -> rusqlite::Result<Option<Initial>> {
+    let (me, now) = (viewer.account, viewer.now);
+    let Some(account) = accounts::by_id(c, me, now)? else { return Ok(None) };
+    let cursor = events::head(c, me)?;
+    let announced = chats::announced_for(c, me)?;
+    // Everyone with a row, and the other side of every chat without one.
+    let mut others: Vec<i64> = relations::rows(c, me)?.into_iter().map(|(other, _)| other).collect();
+    for chat in &announced {
+        let other = chat.other(me);
+        if !others.contains(&other) {
+            others.push(other);
+        }
+    }
+    let mut people = Vec::new();
+    for other in others {
+        people.extend(person(c, me, other, now)?);
+    }
+    let (mut chat_infos, mut histories) = (Vec::new(), Vec::new());
+    for chat in &announced {
+        chat_infos.extend(chat_info(c, me, chat, now)?);
+        let (rows, complete) = chats::visible(c, &chat.id, me, i64::MAX, per_chat)?;
+        histories.push((B64(chat.id), message_frames(c, &chat.id, rows, now)?, complete));
+    }
+    let pins = pins::all(c, me)?.into_iter().map(|(number, pin)| Pin { number, pin: Some(Blob(pin)) }).collect();
+    let snapshot = Snapshot { cursor, account: account.to_frame(), people, chats: chat_infos, pins };
+    Ok(Some(Initial { snapshot, histories }))
+}
+
 impl Link {
     fn viewer(&self) -> Option<Viewer> {
         match self.conn {
@@ -201,19 +250,95 @@ impl Link {
             Ok(head) => head,
             Err(err) => return self.internal("reading the log head", err).await,
         };
+        // A new device, or a cursor this log never reached (a restored
+        // database): start over from a snapshot.
         let from = match cursor {
             Some(cursor) if (0..=head).contains(&cursor) => cursor,
-            _ => return self.error(ErrorCode::BadFrame, "a snapshot isn't supported yet").await,
+            _ => return self.send_snapshot(viewer).await,
         };
         if let (Flow::Close, _) = self.send_events(from, Some(head)).await {
             return Flow::Close;
         }
-        if let Flow::Close = self.send(&ServerFrame::Synced { cursor: head }).await {
+        self.synced(head).await
+    }
+
+    async fn send_snapshot(&mut self, viewer: Viewer) -> Flow {
+        let per_chat = self.state.limits.snapshot_messages;
+        let Initial { snapshot, histories } = match self.state.db.call(move |c| initial(c, viewer, per_chat)).await {
+            Ok(Some(initial)) => initial,
+            Ok(None) => return self.internal("making a snapshot", "the account is gone").await,
+            Err(err) => return self.internal("making a snapshot", err).await,
+        };
+        let cursor = snapshot.cursor;
+        if let Flow::Close = self.send(&ServerFrame::Snapshot { snapshot }).await {
             return Flow::Close;
         }
-        self.cursor = Some(head);
-        // Whatever was appended while this ran.
+        for (chat_id, messages, complete) in histories {
+            if let Flow::Close = self.send(&ServerFrame::History { chat_id, messages, complete }).await {
+                return Flow::Close;
+            }
+        }
+        self.synced(cursor).await
+    }
+
+    /// The device is at `cursor`: say so, list the contacts online, then
+    /// send whatever was appended meanwhile.
+    async fn synced(&mut self, cursor: i64) -> Flow {
+        if let Flow::Close = self.send(&ServerFrame::Synced { cursor }).await {
+            return Flow::Close;
+        }
+        self.cursor = Some(cursor);
+        let Some(viewer) = self.viewer() else { return Flow::Stay };
+        let hub = self.state.hub.clone();
+        let online = self
+            .state
+            .db
+            .call(move |c| -> rusqlite::Result<Vec<Number>> {
+                let mut online = Vec::new();
+                for contact in relations::mutual_contacts(c, viewer.account)? {
+                    if hub.online(contact) {
+                        online.extend(number(c, contact, viewer.now)?);
+                    }
+                }
+                Ok(online)
+            })
+            .await;
+        match online {
+            Ok(numbers) => {
+                for number in numbers {
+                    if let Flow::Close = self.send(&ServerFrame::Presence { number, online: true }).await {
+                        return Flow::Close;
+                    }
+                }
+            }
+            Err(err) => return self.internal("listing contacts online", err).await,
+        }
         self.flush().await
+    }
+
+    /// A page of older messages, before `before`, at most `snapshot_messages`.
+    pub(super) async fn history(&mut self, chat_id: B64<16>, before: i64, limit: u32) -> Flow {
+        let Some(viewer) = self.viewer() else {
+            return self.error(ErrorCode::NotSignedIn, "sign in first").await;
+        };
+        let limit = (limit as usize).min(self.state.limits.snapshot_messages);
+        let chat = chat_id.0;
+        let page = self
+            .state
+            .db
+            .call(move |c| -> rusqlite::Result<Option<(Vec<Message>, bool)>> {
+                if !chats::member(c, &chat, viewer.account)?.is_some_and(|m| m.announced) {
+                    return Ok(None);
+                }
+                let (rows, complete) = chats::visible(c, &chat, viewer.account, before, limit)?;
+                Ok(Some((message_frames(c, &chat, rows, viewer.now)?, complete)))
+            })
+            .await;
+        match page {
+            Ok(Some((messages, complete))) => self.send(&ServerFrame::History { chat_id, messages, complete }).await,
+            Ok(None) => self.error(ErrorCode::ChatUnknown, "No such chat.").await,
+            Err(err) => self.internal("reading history", err).await,
+        }
     }
 
     /// Sends the events after the device's cursor and moves it.

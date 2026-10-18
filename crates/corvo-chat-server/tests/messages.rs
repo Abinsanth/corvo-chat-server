@@ -7,7 +7,7 @@ use common::{
 };
 use corvo_chat_proto::{
     B64, Number,
-    chat::{Event, EventBody, Message, Relation},
+    chat::{Event, EventBody, Marks, Message, Relation},
     frames::{ClientFrame, ErrorCode, ServerFrame},
 };
 use corvo_chat_server::{limits::Limits, relations};
@@ -230,6 +230,9 @@ async fn blocked_sender_gets_sent_and_nothing_arrives() {
     let mut fresh = rahul.client_for(&server).await;
     let synced = fresh.sync_from(Some(0)).await;
     assert!(!synced.events.iter().any(|e| matches!(e.event, EventBody::Message { .. } | EventBody::Chat { .. })));
+    let snapshot = fresh.sync_from(None).await;
+    assert!(snapshot.snapshot.expect("a snapshot").chats.is_empty());
+    assert!(snapshot.histories.is_empty());
     // Abin's own devices still have it.
     let mut a2 = abin.client_for(&server).await;
     let mine = a2.sync_from(Some(0)).await;
@@ -324,4 +327,74 @@ async fn body_over_64_kib_is_a_bad_frame() {
     a.send_raw(WsMessage::text(raw)).await;
     assert_error(a.recv().await, ErrorCode::BadFrame);
     assert!(matches!(lookup(&mut a, rahul.number).await, ServerFrame::Found { .. }));
+}
+
+/// The next pushed `marks`, skipping other events.
+async fn next_marks(client: &mut Client) -> Marks {
+    loop {
+        if let EventBody::Marks { marks, .. } = client.next_event().await.event {
+            return marks;
+        }
+    }
+}
+
+#[tokio::test]
+async fn marks_move_from_sent_to_received_to_read() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = contacts(&server).await;
+    let chat_id = first_message(&mut a, &abin, rahul.number).await;
+    b.send(&ClientFrame::Received { chat_id: chat_id.clone(), through: 1 }).await;
+    assert_eq!(next_marks(&mut a).await, Marks { received_through: 1, read_through: 0 });
+    b.send(&ClientFrame::Read { chat_id, through: 1 }).await;
+    assert_eq!(next_marks(&mut a).await, Marks { received_through: 1, read_through: 1 });
+}
+
+#[tokio::test]
+async fn first_ack_from_any_device_counts() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = contacts(&server).await;
+    let (mut b2, _) = rahul.sign_in(&server, &device("phone")).await;
+    let chat_id = first_message(&mut a, &abin, rahul.number).await;
+    b2.send(&ClientFrame::Received { chat_id: chat_id.clone(), through: 1 }).await;
+    assert_eq!(next_marks(&mut a).await, Marks { received_through: 1, read_through: 0 });
+    b.send(&ClientFrame::Received { chat_id, through: 1 }).await;
+    assert!(a.quiet().await, "a second device's ack changes nothing");
+}
+
+#[tokio::test]
+async fn reading_on_one_device_tells_my_other_devices() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = contacts(&server).await;
+    let (mut b2, _) = rahul.sign_in(&server, &device("phone")).await;
+    let chat_id = first_message(&mut a, &abin, rahul.number).await;
+    b2.send(&ClientFrame::Read { chat_id: chat_id.clone(), through: 1 }).await;
+    loop {
+        if let EventBody::Read { chat_id: read, read_through } = b.next_event().await.event {
+            assert_eq!((read, read_through), (chat_id, 1));
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn acks_never_move_backwards() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = contacts(&server).await;
+    let chat_id = first_message(&mut a, &abin, rahul.number).await;
+    assert_sent(&a.send_body(&chat_id, b"x".to_vec(), None).await);
+    b.send(&ClientFrame::Read { chat_id: chat_id.clone(), through: 2 }).await;
+    assert_eq!(next_marks(&mut a).await, Marks { received_through: 2, read_through: 2 });
+    b.send(&ClientFrame::Read { chat_id: chat_id.clone(), through: 1 }).await;
+    b.send(&ClientFrame::Received { chat_id, through: 1 }).await;
+    assert!(a.quiet().await);
+}
+
+#[tokio::test]
+async fn acks_for_a_chat_i_am_not_in_are_refused() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, _b) = contacts(&server).await;
+    let (_sam, mut s) = Person::active(&server, "sam").await;
+    let chat_id = first_message(&mut a, &abin, rahul.number).await;
+    s.send(&ClientFrame::Read { chat_id, through: 1 }).await;
+    assert_error(s.recv().await, ErrorCode::ChatUnknown);
 }

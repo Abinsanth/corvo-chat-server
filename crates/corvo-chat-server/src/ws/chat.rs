@@ -232,3 +232,55 @@ impl Link {
         }
     }
 }
+
+impl Link {
+    /// `received` and `read`: move this side's cursor; tell this account's
+    /// other devices about a read, and the other side about either if this
+    /// side counts them as a contact. No reply.
+    pub(super) async fn ack(&mut self, chat_id: B64<16>, through: i64, read: bool) -> Flow {
+        let Conn::SignedIn { account_id: me, .. } = self.conn else {
+            return self.error(ErrorCode::NotSignedIn, "sign in first").await;
+        };
+        let hub = self.state.hub.clone();
+        let acked = self
+            .state
+            .db
+            .call(move |c| -> rusqlite::Result<bool> {
+                let chat = chat_id.0;
+                let (Some(row), Some(member)) = (chats::get(c, &chat)?, chats::member(c, &chat, me)?) else {
+                    return Ok(false);
+                };
+                if !member.announced {
+                    return Ok(false);
+                }
+                let mut touched = Touched::default();
+                let tx = c.transaction()?;
+                let received_before = member.received_through;
+                let moved = if read {
+                    chats::read(&tx, &chat, me, through)?
+                } else {
+                    chats::received(&tx, &chat, me, through)?
+                };
+                let received_moved =
+                    chats::member(&tx, &chat, me)?.is_some_and(|m| m.received_through > received_before);
+                if read && moved {
+                    touched.append(&tx, me, &Ev::Read { chat })?;
+                }
+                let other = row.other(me);
+                if (moved || received_moved) && relations::shows_marks(&tx, me, other)? {
+                    touched.append(&tx, other, &Ev::Marks { chat })?;
+                }
+                tx.commit()?;
+                for account in touched.0 {
+                    hub.push(account, Push::Events);
+                }
+                Ok(true)
+            })
+            .await;
+        match acked {
+            Ok(true) => Flow::Stay,
+            Ok(false) => self.error(ErrorCode::ChatUnknown, "No such chat.").await,
+            Err(err) => self.internal("acking", err).await,
+        }
+    }
+}

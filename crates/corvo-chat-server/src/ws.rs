@@ -283,6 +283,9 @@ impl Link {
             F::SignOut => self.sign_out().await,
             F::Sync { cursor } => self.sync(cursor).await,
             F::Lookup { number } => self.lookup(number).await,
+            F::Received { chat_id, through } => self.ack(chat_id, through, false).await,
+            F::Read { chat_id, through } => self.ack(chat_id, through, true).await,
+            F::History { chat_id, before, limit } => self.history(chat_id, before, limit).await,
             F::Send { chat_id, msg_id, body, new_chat } => self.send_message(chat_id, msg_id, body, new_chat).await,
             // The gate refuses a second hello.
             F::Hello { .. } => self.error(ErrorCode::BadFrame, "not expected now").await,
