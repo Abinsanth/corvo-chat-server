@@ -36,6 +36,7 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
 UMask=0077
 Restart=on-failure
 RestartSec=5

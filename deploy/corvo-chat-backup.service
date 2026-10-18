@@ -30,4 +30,5 @@ CapabilityBoundingSet=
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
 UMask=0077
