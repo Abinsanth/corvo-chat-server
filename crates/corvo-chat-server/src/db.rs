@@ -9,8 +9,9 @@ use rusqlite::Connection;
 /// The database file inside the data directory.
 pub const DB_FILE: &str = "server.db";
 
-/// Migration 1: all of M1's tables.
-const MIGRATIONS: &[&str] = &["
+/// Migration 1: M1's tables (accounts). Migration 2: M2's tables (chats and sync).
+const MIGRATIONS: &[&str] = &[
+    "
 CREATE TABLE accounts (
   id INTEGER PRIMARY KEY,
   username TEXT NOT NULL UNIQUE,
@@ -41,7 +42,62 @@ CREATE TABLE invites (
 );
 CREATE TABLE attempts (kind TEXT NOT NULL, key TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX attempts_by_key ON attempts (kind, key, at);
-"];
+",
+    "
+CREATE TABLE relations (
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  other_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  state TEXT NOT NULL,
+  since INTEGER NOT NULL,
+  PRIMARY KEY (account_id, other_id)
+);
+CREATE INDEX relations_by_other ON relations (other_id);
+CREATE TABLE chats (
+  id BLOB PRIMARY KEY,
+  low INTEGER NOT NULL, high INTEGER NOT NULL,
+  creator INTEGER NOT NULL,
+  signature BLOB NOT NULL,
+  last_seq INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  UNIQUE (low, high)
+);
+CREATE TABLE chat_members (
+  chat_id BLOB NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  sealed_key BLOB NOT NULL,
+  received_through INTEGER NOT NULL DEFAULT 0,
+  read_through INTEGER NOT NULL DEFAULT 0,
+  cleared_through INTEGER NOT NULL DEFAULT 0,
+  announced INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (chat_id, account_id)
+);
+CREATE INDEX chat_members_by_account ON chat_members (account_id);
+CREATE TABLE messages (
+  chat_id BLOB NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  msg_id BLOB NOT NULL,
+  sender_id INTEGER NOT NULL,
+  body BLOB NOT NULL,
+  sent_at INTEGER NOT NULL,
+  withheld INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (chat_id, seq),
+  UNIQUE (chat_id, msg_id)
+);
+CREATE TABLE events (
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  chat_id BLOB, other_id INTEGER, msg_seq INTEGER, number TEXT,
+  PRIMARY KEY (account_id, seq)
+);
+CREATE TABLE pins (
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  number TEXT NOT NULL,
+  pin BLOB NOT NULL,
+  PRIMARY KEY (account_id, number)
+);
+",
+];
 
 /// Opens (creating if needed) the database with WAL, foreign keys and a busy
 /// timeout, and brings it up to date.
@@ -100,7 +156,7 @@ mod tests {
         migrate(&mut conn).unwrap();
         migrate(&mut conn).unwrap();
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, 1_i64);
+        assert_eq!(version, 2_i64);
     }
 
     #[test]

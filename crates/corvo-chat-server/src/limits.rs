@@ -16,6 +16,14 @@ pub struct Limits {
     pub open_invites: usize,
     pub device_idle_secs: i64,
     pub reauth_secs: i64,
+    pub messages_per_minute: u32,
+    pub new_people_per_day: u32,
+    pub lookups_per_hour: u32,
+    pub open_requests: i64,
+    pub request_messages: i64,
+    /// Messages per chat in a new device's snapshot, and the most one
+    /// `history` page holds.
+    pub snapshot_messages: usize,
 }
 
 impl Default for Limits {
@@ -35,6 +43,12 @@ impl Default for Limits {
             open_invites: 5,
             device_idle_secs: 30 * 86_400,
             reauth_secs: 300,
+            messages_per_minute: 60,
+            new_people_per_day: 20,
+            lookups_per_hour: 30,
+            open_requests: 20,
+            request_messages: 20,
+            snapshot_messages: 50,
         }
     }
 }

@@ -4,15 +4,21 @@
 pub mod accounts;
 pub mod admin;
 pub mod attempts;
+pub mod chats;
 pub mod cleanup;
 pub mod clock;
 pub mod db;
+pub mod events;
 pub mod hub;
 pub mod invites;
 pub mod key;
 pub mod limits;
+pub mod pins;
+pub mod relations;
 pub mod sessions;
 pub mod state;
+#[cfg(test)]
+mod testing;
 mod tls;
 pub mod ws;
 

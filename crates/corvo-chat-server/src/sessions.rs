@@ -129,6 +129,11 @@ pub fn list(conn: &Connection, account_id: i64) -> rusqlite::Result<Vec<SessionR
     stmt.query_map([account_id], row)?.collect()
 }
 
+pub fn rename(conn: &Connection, id: i64, name: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE sessions SET name = ?2 WHERE id = ?1", params![id, name])?;
+    Ok(())
+}
+
 pub fn delete(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
     Ok(conn.execute("DELETE FROM sessions WHERE id = ?1", [id])? > 0)
 }
@@ -218,6 +223,14 @@ mod tests {
         assert_eq!(list(&c, 1).unwrap().iter().map(|s| s.id).collect::<Vec<_>>(), vec![b.id]);
         assert!(delete(&c, b.id).unwrap());
         assert!(!delete(&c, b.id).unwrap());
+    }
+
+    #[test]
+    fn rename_changes_the_device_name() {
+        let mut c = conn();
+        let s = create(&mut c, 1, &device(1), 10, 3).unwrap();
+        rename(&c, s.id, "work laptop").unwrap();
+        assert_eq!(list(&c, 1).unwrap()[0].device.name, "work laptop");
     }
 
     #[test]
