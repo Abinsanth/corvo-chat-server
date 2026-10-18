@@ -11,6 +11,8 @@ pub mod hub;
 pub mod invites;
 pub mod key;
 pub mod limits;
+pub mod pins;
+pub mod relations;
 pub mod sessions;
 pub mod state;
 mod tls;

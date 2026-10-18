@@ -3,7 +3,7 @@
 
 use corvo_chat_proto::frames::Account;
 use corvo_chat_proto::names::{ENDING_ALPHABET, ENDING_LEN};
-use corvo_chat_proto::{Number, PublicKeys};
+use corvo_chat_proto::{B64, Number, PublicKeys};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::limits::Limits;
@@ -176,6 +176,29 @@ pub fn by_number(conn: &Connection, number: Number, now: i64) -> rusqlite::Resul
     find(conn, "number", number.digits(), now)
 }
 
+/// An active account by number: `None` for a pending or unknown one.
+pub fn active_by_number(conn: &Connection, number: Number, now: i64) -> rusqlite::Result<Option<AccountRow>> {
+    Ok(by_number(conn, number, now)?.filter(|row| row.pending_until.is_none()))
+}
+
+pub fn set_display_name(conn: &Connection, id: i64, name: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE accounts SET display_name = ?2 WHERE id = ?1", params![id, name])?;
+    Ok(())
+}
+
+/// The public keys the account signed up with.
+pub fn public_keys(conn: &Connection, id: i64) -> rusqlite::Result<PublicKeys> {
+    let bad = |i: usize| rusqlite::Error::InvalidColumnType(i, "public key".into(), rusqlite::types::Type::Blob);
+    conn.query_row("SELECT signing_key, exchange_key, key_signature FROM accounts WHERE id = ?1", [id], |r| {
+        let (signing, exchange, signature): (Vec<u8>, Vec<u8>, Vec<u8>) = (r.get(0)?, r.get(1)?, r.get(2)?);
+        Ok(PublicKeys {
+            signing: B64(signing.try_into().map_err(|_| bad(0))?),
+            exchange: B64(exchange.try_into().map_err(|_| bad(1))?),
+            signature: B64(signature.try_into().map_err(|_| bad(2))?),
+        })
+    })
+}
+
 /// The password and recovery OPAQUE records.
 pub fn records(conn: &Connection, id: i64) -> rusqlite::Result<(Vec<u8>, Vec<u8>)> {
     conn.query_row("SELECT password_record, recovery_record FROM accounts WHERE id = ?1", [id], |r| {
@@ -237,7 +260,6 @@ pub fn lock_state(row: &AccountRow, now: i64) -> LockState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use corvo_chat_proto::{B64, PublicKeys};
     use rusqlite::Connection;
 
     fn conn() -> Connection {
@@ -262,6 +284,33 @@ mod tests {
             recovery_copy: vec![4; 40],
             public_keys: PublicKeys { signing: B64([5; 32]), exchange: B64([6; 32]), signature: B64([7; 64]) },
         }
+    }
+
+    #[test]
+    fn pending_account_is_not_found_by_active_by_number() {
+        let mut c = conn();
+        let n = number(482_910_557);
+        let id = create_pending(&mut c, &new_account("abin-0000", n), 100, 86_400).unwrap();
+        assert!(active_by_number(&c, n, 100).unwrap().is_none());
+        activate(&c, id, None, 100).unwrap();
+        assert_eq!(active_by_number(&c, n, 100).unwrap().map(|row| row.id), Some(id));
+        assert!(active_by_number(&c, number(100_000_000), 100).unwrap().is_none());
+    }
+
+    #[test]
+    fn set_display_name_changes_the_frame() {
+        let mut c = conn();
+        let id = create_pending(&mut c, &new_account("abin-0000", number(482_910_557)), 100, 86_400).unwrap();
+        set_display_name(&c, id, "Abin P").unwrap();
+        assert_eq!(by_id(&c, id, 100).unwrap().unwrap().to_frame().display_name, "Abin P");
+    }
+
+    #[test]
+    fn public_keys_come_back_as_stored() {
+        let mut c = conn();
+        let new = new_account("abin-0000", number(482_910_557));
+        let id = create_pending(&mut c, &new, 100, 86_400).unwrap();
+        assert_eq!(public_keys(&c, id).unwrap(), new.public_keys);
     }
 
     #[test]
