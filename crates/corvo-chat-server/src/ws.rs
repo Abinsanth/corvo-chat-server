@@ -143,8 +143,10 @@ async fn run(socket: WebSocket, state: AppState, ip: IpAddr) {
     if let Ok(Flow::Stay) = timeout_at(anon_until, link.hello()).await {
         link.serve(anon_until).await;
     }
-    if let Some(session) = link.conn.session() {
-        link.state.hub.leave(session, link.id);
+    if let Some(session) = link.conn.session()
+        && let Some(account) = link.state.hub.leave(session, link.id)
+    {
+        link.tell_contacts(account).await;
     }
     let _ = timeout(SEND_TIMEOUT, link.socket.send(Message::Close(None))).await;
 }
