@@ -51,8 +51,10 @@ impl Link {
                     if target.id == session {
                         return Ok(None);
                     }
-                    sessions::delete(c, target.id)?;
-                    crate::events::note_devices(c, &hub, account_id)?;
+                    let tx = c.transaction()?;
+                    sessions::delete(&tx, target.id)?;
+                    crate::events::note_devices(&tx, &hub, account_id)?;
+                    tx.commit()?;
                     hub.kick(target.id, Kick::SignedOut(SignedOutReason::ByAnotherDevice));
                 }
                 infos(c, account_id, session).map(Some)

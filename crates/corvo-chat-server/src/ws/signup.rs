@@ -9,7 +9,7 @@ use corvo_chat_proto::{
 use data_encoding::BASE64;
 use opaque_ke::{RegistrationRequest, RegistrationUpload, ServerRegistration};
 
-use super::{Conn, Flow, Link, people::befriend_on_activation, sign_in::Done};
+use super::{Conn, Flow, Link, chat::Touched, people::befriend_on_activation, sign_in::Done};
 use crate::{
     accounts::{self, CreateError, NewAccount},
     attempts,
@@ -244,18 +244,24 @@ impl Link {
                 if row.pending_until.is_none() {
                     return Ok(Err(ErrorCode::BadFrame));
                 }
-                match invites::redeem(c, account_id, &code, now, limits.code_tries) {
+                // Every outcome commits: a wrong code must count.
+                let mut touched = Touched::default();
+                let tx = c.transaction()?;
+                let answer = match invites::redeem(&tx, account_id, &code, now, limits.code_tries) {
                     Ok(inviter) => {
-                        accounts::activate(c, account_id, inviter, now)?;
+                        accounts::activate(&tx, account_id, inviter, now)?;
                         if let Some(inviter) = inviter {
-                            befriend_on_activation(c, &hub, (account_id, row.number), inviter, now)?;
+                            befriend_on_activation(&tx, (account_id, row.number), inviter, now, &mut touched)?;
                         }
-                        Ok(Ok(Some(Account { pending_until: None, ..row.to_frame() })))
+                        Ok(Some(Account { pending_until: None, ..row.to_frame() }))
                     }
-                    Err(InviteError::Wrong) => Ok(Err(ErrorCode::CodeWrong)),
-                    Err(InviteError::Dead | InviteError::TooMany) => Ok(Err(ErrorCode::CodeDead)),
-                    Err(InviteError::Db(err)) => Err(err),
-                }
+                    Err(InviteError::Wrong) => Err(ErrorCode::CodeWrong),
+                    Err(InviteError::Dead | InviteError::TooMany) => Err(ErrorCode::CodeDead),
+                    Err(InviteError::Db(err)) => return Err(err),
+                };
+                tx.commit()?;
+                touched.poke(&hub);
+                Ok(answer)
             })
             .await;
         match done {
@@ -327,8 +333,10 @@ impl Link {
             .state
             .db
             .call(move |c| -> rusqlite::Result<()> {
-                sessions::delete(c, session)?;
-                crate::events::note_devices(c, &hub, account_id)
+                let tx = c.transaction()?;
+                sessions::delete(&tx, session)?;
+                crate::events::note_devices(&tx, &hub, account_id)?;
+                tx.commit()
             })
             .await;
         if let Err(err) = signed_out {

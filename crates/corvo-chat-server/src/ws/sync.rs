@@ -58,10 +58,13 @@ fn marks(c: &Connection, chat: &ChatRow, viewer: i64) -> rusqlite::Result<Option
     if !relations::shows_marks(c, other, viewer)? {
         return Ok(None);
     }
+    // Only now that marks are shared may the viewer learn which of its own
+    // messages never arrived, so they stay `·`.
+    let withheld = chats::withheld_ranges(c, &chat.id, viewer)?;
     Ok(chats::member(c, &chat.id, other)?.map(|m| Marks {
         received_through: m.received_through,
         read_through: m.read_through,
-        withheld: Vec::new(),
+        withheld,
     }))
 }
 
@@ -363,7 +366,7 @@ impl Link {
         let Some(viewer) = self.viewer() else {
             return self.error(ErrorCode::NotSignedIn, "sign in first").await;
         };
-        let limit = (limit as usize).min(self.state.limits.snapshot_messages);
+        let limit = (limit as usize).clamp(1, self.state.limits.snapshot_messages);
         let chat = chat_id.0;
         let page = self.state.db.call(move |c| history_page(c, viewer, &chat, before, limit)).await;
         match page {

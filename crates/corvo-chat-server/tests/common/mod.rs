@@ -11,12 +11,12 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::Router;
 use corvo_chat_proto::opaque::Suite;
 use corvo_chat_server::{
-    AppState, Tls,
+    AppState, Timeouts, Tls,
     clock::Clock,
     db::{self, Db},
     hub::Hub,
     limits::Limits,
-    serve,
+    serve_with,
 };
 use opaque_ke::ServerSetup;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -46,10 +46,15 @@ pub fn self_signed() -> (Arc<rustls::ServerConfig>, CertificateDer<'static>) {
 
 /// Serves `app` on a free local port with a fresh self-signed certificate.
 pub async fn start(app: Router) -> (SocketAddr, CertificateDer<'static>) {
+    start_with(app, Timeouts::default()).await
+}
+
+/// Like `start`, with chosen timeouts.
+pub async fn start_with(app: Router, timeouts: Timeouts) -> (SocketAddr, CertificateDer<'static>) {
     let (config, der) = self_signed();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("a free port");
     let addr = listener.local_addr().expect("a bound address");
-    tokio::spawn(serve(listener, Tls::Static(config), app));
+    tokio::spawn(serve_with(listener, Tls::Static(config), app, timeouts));
     (addr, der)
 }
 

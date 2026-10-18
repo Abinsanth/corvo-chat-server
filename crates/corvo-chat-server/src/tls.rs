@@ -36,8 +36,27 @@ pub enum Tls {
     Static(Arc<ServerConfig>),
 }
 
+/// How long a connection may take over its TLS handshake, and over each
+/// request's headers (also while it sits idle between requests).
+#[derive(Clone, Copy, Debug)]
+pub struct Timeouts {
+    pub handshake: Duration,
+    pub header: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Timeouts {
+        Timeouts { handshake: HANDSHAKE_TIMEOUT, header: HEADER_TIMEOUT }
+    }
+}
+
 /// Accepts connections forever. A failed `accept` is logged and retried, never returned.
 pub async fn serve(listener: TcpListener, tls: Tls, app: Router) {
+    serve_with(listener, tls, app, Timeouts::default()).await
+}
+
+/// [`serve`] with chosen timeouts.
+pub async fn serve_with(listener: TcpListener, tls: Tls, app: Router, timeouts: Timeouts) {
     let (default, challenge) = match tls {
         Tls::Static(config) => (config, None),
         Tls::Acme { domain, cache_dir } => {
@@ -68,7 +87,7 @@ pub async fn serve(listener: TcpListener, tls: Tls, app: Router) {
         };
         let (default, challenge, app) = (default.clone(), challenge.clone(), app.clone());
         tokio::spawn(async move {
-            let Ok(Some(stream)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(tcp, default, challenge)).await
+            let Ok(Some(stream)) = tokio::time::timeout(timeouts.handshake, handshake(tcp, default, challenge)).await
             else {
                 return;
             };
@@ -79,7 +98,7 @@ pub async fn serve(listener: TcpListener, tls: Tls, app: Router) {
             // The header timer also runs while a connection sits idle, before or between requests.
             let _ = http1::Builder::new()
                 .timer(TokioTimer::new())
-                .header_read_timeout(HEADER_TIMEOUT)
+                .header_read_timeout(timeouts.header)
                 .serve_connection(TokioIo::new(stream), service)
                 .with_upgrades()
                 .await;

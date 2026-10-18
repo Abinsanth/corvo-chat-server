@@ -362,7 +362,9 @@ S: sent      {chat_id, msg_id, seq, sent_at}
 - `new_chat` goes with the chat's first message only. If the two already
   have a chat (both started one at the same moment), the answer is
   `not_sent` with `chat_exists`, and the existing chat arrives as an event:
-  encrypt the message again with its key and send it there.
+  encrypt the message again with its key and send it there. If the other
+  side's first message made you a request, `accept` first, or the resend
+  gets `not_allowed`.
 - **Resending** after a reconnect (the same `msg_id` in the same chat)
   returns the first `sent` and stores nothing new. Messages marked `○` can
   always be resent.
@@ -391,10 +393,10 @@ C: read      {chat_id, through}
   arrive at once.
 - A `read` also reaches your own other devices as a `read` event, so they
   clear the unread count.
-- **Known limit:** marks are cursors. A message withheld earlier (you were
-  blocked, or over the request limits) still sits below them, so if the
-  other side later accepts you and reads past it, it shows `✓✓` though it
-  never reached them.
+- `marks.withheld` lists, as inclusive seq ranges, your own messages that
+  never reached them (you were blocked, or over the request limits). Those
+  stay `·` for good, whatever the cursors say. It only comes with marks,
+  so you learn it only once they share marks with you again.
 
 ## 11. Sync
 
@@ -420,9 +422,18 @@ S: events   {events, cursor}          live, from then on
   `history {chat_id, messages, complete}` per chat with its latest 50
   messages, then `synced`. A cursor the log never reached (a restored
   server) gets the same.
-- **Older messages:** `history {chat_id, before, limit}` (at most 50) →
+- **Older messages:** `history {chat_id, before, limit}` (1 to 50) →
   `history {chat_id, messages, complete}`, oldest first. `complete` means
-  there's nothing older to show.
+  there's nothing older to show. A page also stops once its bodies reach
+  512 KiB.
+- **Frame sizes:** what the server sends (`snapshot`, `history`, `events`)
+  can be several MB; only what a client sends is capped at 128 KiB.
+- **Unread counts:** count the visible messages after your `read_through`,
+  not `last_seq - read_through`: seq numbers have gaps for messages you
+  never see.
+- **Empty chats:** after a reject or a block, the chat (now empty for you)
+  and the person (`relation: none`) can stay in a snapshot. Hide chats with
+  no visible messages and no relation.
 
 Event kinds (`{"seq": 7, "event": {"kind": …}}`):
 
@@ -441,7 +452,8 @@ Event kinds (`{"seq": 7, "event": {"kind": …}}`):
 A `chat` holds both sealed copies (`keys`, the creator's first), the
 signature, `last_seq`, your own `read_through` and `cleared_through`, and the
 other side's `marks` when they share them. A `person` holds the number, the
-display name when they share it, their public keys, and your `relation`.
+display name when they share it, their public keys, your `relation`, and
+`deleted` once they deleted their account.
 
 ## 12. Presence, pins and names
 
@@ -460,7 +472,24 @@ display name when they share it, their public keys, and your `relation`.
   names, pins, `block` and `unblock` (`rate_limited`, `Too many changes.
   Wait an hour.`), and at most 500 pinned keys (`not_allowed`).
 
-## 13. Every frame
+## 13. Reports, bans and deleting
+
+- **`report {number, reason, block}`** → `reported`. The reason is
+  optional, trimmed, at most 200 characters with no control characters
+  (`bad_frame` otherwise). At most 10 reports a day (`rate_limited`). A
+  number you have no row about costs a lookup. With `block: true` they're
+  blocked in the same step.
+- **Bans** are the admin's. A banned account's sign-in or recovery is
+  refused with `banned` only after the password or code is proven. Its
+  connected devices get `signed_out {reason: "banned"}` within a minute.
+  Lookups and messages to a banned number get `banned`.
+- **`delete_account`** (after a reauth, like a password change): every
+  device of the account gets `signed_out {reason: "account_deleted"}`. The
+  number and username are never used again. Everyone who knew it gets a
+  `person` event with `deleted: true` and no name, and keeps the chat;
+  a message to it gets `not_sent` with `account_deleted`.
+
+## 14. Every frame
 
 ### Client frames
 
@@ -497,6 +526,8 @@ display name when they share it, their public keys, and your `relation`.
 | `set_display_name` | Active | `{"type":"set_display_name","display_name":"Abin"}` |
 | `rename_device` | Active | `{"type":"rename_device","name":"work laptop"}` |
 | `set_pin` | Active | `{"type":"set_pin","pin":{"number":"4829105572","pin":"<b64>"}}` |
+| `report` | Active | `{"type":"report","number":"4829105572","reason":"spam","block":true}` |
+| `delete_account` | Active, reauthed | `{"type":"delete_account"}` |
 
 ### Server frames
 
@@ -515,7 +546,7 @@ display name when they share it, their public keys, and your `relation`.
 | `invited` | `{"type":"invited","invite":{"number":"4829105572","display_name":"Rahul","code":"482913","expires_at":1800086400}}` |
 | `invites` | `{"type":"invites","invites":[{…}]}` |
 | `devices` | `{"type":"devices","devices":[{"id":"<b64:16>","kind":"cli","name":"abins-laptop","first_seen":1800000000,"last_used":1800000000,"this_device":true}]}` |
-| `signed_out` | `{"type":"signed_out","reason":"by_another_device"}`. Reasons: `this_device`, `by_another_device`, `password_changed`, `recovered`, `expired`. The connection closes after it |
+| `signed_out` | `{"type":"signed_out","reason":"by_another_device"}`. Reasons: `this_device`, `by_another_device`, `password_changed`, `recovered`, `expired`, `banned`, `account_deleted`. The connection closes after it |
 | `error` | `{"type":"error","code":"locked","message":"Locked for 15 more minutes","until":1800000900}` |
 | `snapshot` | `{"type":"snapshot","snapshot":{"cursor":41,"account":{…},"people":[…],"chats":[…],"pins":[…]}}` |
 | `events` | `{"type":"events","events":[{"seq":42,"event":{"kind":"read","chat_id":"<b64:16>","read_through":12}}],"cursor":42}` |
@@ -525,6 +556,7 @@ display name when they share it, their public keys, and your `relation`.
 | `sent` | `{"type":"sent","chat_id":"<b64:16>","msg_id":"<b64:16>","seq":12,"sent_at":1800000000}` |
 | `not_sent` | `{"type":"not_sent","chat_id":"<b64:16>","msg_id":"<b64:16>","code":"rate_limited","message":"Too many messages. Slow down."}` |
 | `presence` | `{"type":"presence","number":"4829105572","online":true}` |
+| `reported` | `{"type":"reported"}` |
 
 ### Error codes
 
@@ -560,3 +592,5 @@ The `message` is meant to be shown as it is.
 | `number_unknown` | A number that isn't an active account, or your own | `That number isn't on corvo-chat.` |
 | `chat_unknown` | A chat that doesn't exist or isn't yours | `No such chat.` |
 | `chat_exists` | A second chat for the same two people (in `not_sent`) | `You already have a chat with them.` |
+| `banned` | Signing in to, looking up or messaging a banned account | `This account has been banned.` |
+| `account_deleted` | A message to a deleted account (in `not_sent`) | `That account was deleted.` |

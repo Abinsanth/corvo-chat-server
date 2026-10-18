@@ -3,8 +3,8 @@ mod common;
 use std::{sync::Arc, time::Duration};
 
 use axum::{Extension, routing::get};
-use common::{connect, fetch, ring, start, state};
-use corvo_chat_server::{PeerAddr, app, limits::Limits};
+use common::{connect, fetch, ring, start, start_with, state};
+use corvo_chat_server::{PeerAddr, Timeouts, app, limits::Limits};
 use rustls::pki_types::ServerName;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -42,21 +42,29 @@ async fn plain_http_does_not_stop_the_server() {
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 }
 
-#[tokio::test(start_paused = true)]
+/// A server whose handshake and header timeouts are one second, so the
+/// timeout tests run in real time: a paused clock raced the server's own
+/// timers on a busy machine.
+async fn quick_server() -> (std::net::SocketAddr, rustls::pki_types::CertificateDer<'static>, tempfile::TempDir) {
+    let (state, dir) = state(Limits::default());
+    let timeouts = Timeouts { handshake: Duration::from_secs(1), header: Duration::from_secs(1) };
+    let (addr, der) = start_with(app(state), timeouts).await;
+    (addr, der, dir)
+}
+
+#[tokio::test]
 async fn silent_connection_is_closed_after_the_handshake_timeout() {
-    let (state, _dir) = state(Limits::default());
-    let (addr, _) = start(app(state)).await;
+    let (addr, _, _dir) = quick_server().await;
     let mut tcp = TcpStream::connect(addr).await.expect("the server accepts");
     let mut buf = [0; 1];
-    assert!(timeout(Duration::from_secs(9), tcp.read(&mut buf)).await.is_err(), "closed before 9 s");
-    let read = timeout(Duration::from_secs(2), tcp.read(&mut buf)).await.expect("closed by 11 s");
+    assert!(timeout(Duration::from_millis(500), tcp.read(&mut buf)).await.is_err(), "closed before 500 ms");
+    let read = timeout(Duration::from_secs(3), tcp.read(&mut buf)).await.expect("closed by 3 s");
     assert_eq!(read.expect("a clean close"), 0);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn client_that_stalls_after_its_hello_is_closed_after_the_handshake_timeout() {
-    let (state, _dir) = state(Limits::default());
-    let (addr, der) = start(app(state)).await;
+    let (addr, der, _dir) = quick_server().await;
     let mut roots = rustls::RootCertStore::empty();
     roots.add(der).expect("the test certificate is a valid root");
     let config = rustls::ClientConfig::builder_with_provider(ring())
@@ -71,39 +79,31 @@ async fn client_that_stalls_after_its_hello_is_closed_after_the_handshake_timeou
     let mut tcp = TcpStream::connect(addr).await.expect("the server accepts");
     tcp.write_all(&hello).await.expect("the hello is sent");
     // Never answer the server's reply: drain it until the server gives up.
-    let closed = timeout(Duration::from_secs(11), async {
+    let closed = timeout(Duration::from_secs(3), async {
         let mut buf = [0; 4096];
         while tcp.read(&mut buf).await.is_ok_and(|n| n > 0) {}
     });
-    closed.await.expect("closed by 11 s");
+    closed.await.expect("closed by 3 s");
 }
 
 #[tokio::test]
 async fn connection_that_sends_no_request_is_closed_after_the_header_timeout() {
-    let (state, _dir) = state(Limits::default());
-    let (addr, der) = start(app(state)).await;
+    let (addr, der, _dir) = quick_server().await;
     let mut stream = connect(addr, der).await;
-    // Let the server finish its side of the handshake in real time; a paused clock
-    // could jump ahead of it and start its timer late.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    tokio::time::pause();
     let mut buf = [0; 1];
-    assert!(timeout(Duration::from_secs(29), stream.read(&mut buf)).await.is_err(), "closed before 29 s");
-    let read = timeout(Duration::from_secs(2), stream.read(&mut buf)).await.expect("closed by 31 s");
+    assert!(timeout(Duration::from_millis(500), stream.read(&mut buf)).await.is_err(), "closed before 500 ms");
+    let read = timeout(Duration::from_secs(3), stream.read(&mut buf)).await.expect("closed by 3 s");
     assert!(read.is_err() || read.is_ok_and(|n| n == 0));
 }
 
 #[tokio::test]
 async fn connection_idle_after_a_request_is_closed_after_the_header_timeout() {
-    let (state, _dir) = state(Limits::default());
-    let (addr, der) = start(app(state)).await;
+    let (addr, der, _dir) = quick_server().await;
     let mut stream = connect(addr, der).await;
     stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").await.expect("the request is sent");
     let mut buf = [0; 4096];
     let n = stream.read(&mut buf).await.expect("the response arrives");
     assert!(String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200"));
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    tokio::time::pause();
-    let closed = timeout(Duration::from_secs(31), async { while stream.read(&mut buf).await.is_ok_and(|n| n > 0) {} });
-    closed.await.expect("closed by 31 s");
+    let closed = timeout(Duration::from_secs(3), async { while stream.read(&mut buf).await.is_ok_and(|n| n > 0) {} });
+    closed.await.expect("closed by 3 s");
 }
