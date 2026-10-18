@@ -29,6 +29,7 @@ use crate::{
     hub::{Kick, Push},
 };
 
+mod chat;
 mod devices;
 mod secrets;
 mod sign_in;
@@ -281,6 +282,8 @@ impl Link {
             F::SignOutDevice { id } => self.sign_out_device(id).await,
             F::SignOut => self.sign_out().await,
             F::Sync { cursor } => self.sync(cursor).await,
+            F::Lookup { number } => self.lookup(number).await,
+            F::Send { chat_id, msg_id, body, new_chat } => self.send_message(chat_id, msg_id, body, new_chat).await,
             // The gate refuses a second hello.
             F::Hello { .. } => self.error(ErrorCode::BadFrame, "not expected now").await,
             // Chats and sync arrive in the next changes.

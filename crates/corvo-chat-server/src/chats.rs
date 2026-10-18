@@ -203,14 +203,7 @@ pub fn add_message(
     now: i64,
     withheld: bool,
 ) -> rusqlite::Result<Added> {
-    let known = c
-        .query_row(
-            "SELECT seq, sent_at FROM messages WHERE chat_id = ?1 AND msg_id = ?2",
-            params![id.as_slice(), msg_id.as_slice()],
-            |r| Ok(Added { seq: r.get(0)?, sent_at: r.get(1)?, new: false }),
-        )
-        .optional()?;
-    if let Some(known) = known {
+    if let Some(known) = by_msg_id(c, id, msg_id)? {
         return Ok(known);
     }
     let seq: i64 = c.query_row(
@@ -224,6 +217,16 @@ pub fn add_message(
         params![id.as_slice(), seq, msg_id.as_slice(), sender, body, now, withheld],
     )?;
     Ok(Added { seq, sent_at: now, new: true })
+}
+
+/// Where the message with this `msg_id` is, if the chat has it.
+pub fn by_msg_id(c: &Connection, id: &[u8; 16], msg_id: &[u8; 16]) -> rusqlite::Result<Option<Added>> {
+    c.query_row(
+        "SELECT seq, sent_at FROM messages WHERE chat_id = ?1 AND msg_id = ?2",
+        params![id.as_slice(), msg_id.as_slice()],
+        |r| Ok(Added { seq: r.get(0)?, sent_at: r.get(1)?, new: false }),
+    )
+    .optional()
 }
 
 pub fn message(c: &Connection, id: &[u8; 16], seq: i64) -> rusqlite::Result<Option<MessageRow>> {
