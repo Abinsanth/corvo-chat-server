@@ -83,22 +83,37 @@ async fn deleted_number_and_username_are_retired() {
 
 #[tokio::test]
 async fn deleted_account_keeps_no_secrets() {
+    use corvo_chat_proto::{Blob, chat::Pin};
     let server = start_server().await;
-    let (abin, mut a) = Person::active(&server, "abin").await;
+    let (abin, mut a, rahul, _b) = contacts(&server).await;
     let id = abin.id(&server).await;
-    delete(&mut a, &abin).await;
-    let wiped = "SELECT length(password_record) + length(recovery_record) + length(password_copy)
-                 + length(recovery_copy) + length(display_name) FROM accounts WHERE id = ?1";
-    assert_eq!(count(&server, wiped, id).await, 0);
-    for sql in [
+    let (dev, _d) = Person::active(&server, "dev").await;
+    first_message(&mut a, &abin, dev.number).await;
+    a.send(&ClientFrame::SetPin { pin: Pin { number: rahul.number, pin: Some(Blob(vec![1])) } }).await;
+    // Frames are handled in order, so the invite's answer means the pin is in.
+    let (sam, _s) = Person::sign_up(&server, "sam").await;
+    a.send(&ClientFrame::Invite { number: sam.number }).await;
+    assert!(matches!(a.recv().await, ServerFrame::Invited { .. }));
+    let gone = [
         "SELECT COUNT(*) FROM pins WHERE account_id = ?1",
         "SELECT COUNT(*) FROM events WHERE account_id = ?1",
         "SELECT COUNT(*) FROM sessions WHERE account_id = ?1",
         "SELECT COUNT(*) FROM invites WHERE account_id = ?1 OR inviter_id = ?1",
-        "SELECT COUNT(*) FROM relations WHERE account_id = ?1",
-    ] {
+        "SELECT COUNT(*) FROM relations WHERE account_id = ?1 AND state != 'contact'",
+    ];
+    for sql in gone {
+        assert!(count(&server, sql, id).await > 0, "nothing to wipe: {sql}");
+    }
+    delete(&mut a, &abin).await;
+    let wiped = "SELECT length(password_record) + length(recovery_record) + length(password_copy)
+                 + length(recovery_copy) + length(display_name) FROM accounts WHERE id = ?1";
+    assert_eq!(count(&server, wiped, id).await, 0);
+    for sql in gone {
         assert_eq!(count(&server, sql, id).await, 0, "{sql}");
     }
+    // Its contact rows stay, frozen, so the other side keeps its marks.
+    let contact = "SELECT COUNT(*) FROM relations WHERE account_id = ?1 AND state = 'contact'";
+    assert_eq!(count(&server, contact, id).await, 1);
     assert_eq!(count(&server, "SELECT deleted_at IS NOT NULL FROM accounts WHERE id = ?1", id).await, 1);
 }
 
