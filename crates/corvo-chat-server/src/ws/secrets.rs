@@ -119,14 +119,14 @@ impl Link {
                         SessionError::Db(e) => e.to_string(),
                         SessionError::DeviceLimit => "device limit right after deleting every session".into(),
                     })?;
-                let kick = join(&hub, conn_id, &session);
+                let joined = join(&hub, account_id, conn_id, &session);
                 Ok(Some(Done {
                     session: session.id,
                     account_id,
                     token: session.token,
                     account: row.to_frame(),
                     copy: None,
-                    kick,
+                    joined,
                 }))
             })
             .await;

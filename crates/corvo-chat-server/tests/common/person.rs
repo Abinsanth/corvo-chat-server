@@ -34,6 +34,7 @@ pub struct Person {
     pub device: Device,
     pub token: B64<32>,
     pub keys: SigningKey,
+    pub exchange: [u8; 32],
     pub password_copy: Vec<u8>,
     pub recovery_copy: Vec<u8>,
 }
@@ -48,6 +49,7 @@ pub struct Begun {
     pub recovery: String,
     pub device: Device,
     pub keys: SigningKey,
+    pub exchange: [u8; 32],
     pub finish: ClientFrame,
 }
 
@@ -103,7 +105,7 @@ pub async fn begin_signup_with(
             signature: B64(signature),
         },
     };
-    Ok(Begun { username, number, password, recovery, device, keys, finish })
+    Ok(Begun { username, number, password, recovery, device, keys, exchange, finish })
 }
 
 /// How the client side of an OPAQUE login (sign-in, recovery or reauth) went.
@@ -223,6 +225,7 @@ impl Person {
             device: begun.device,
             token,
             keys: begun.keys,
+            exchange: begun.exchange,
             password_copy,
             recovery_copy,
         };
@@ -243,6 +246,15 @@ impl Person {
             })
             .await;
         (person, client)
+    }
+
+    /// The public keys sent at signup.
+    pub fn public_keys(&self) -> PublicKeys {
+        PublicKeys {
+            signing: B64(self.keys.verifying_key().to_bytes()),
+            exchange: B64(self.exchange),
+            signature: B64(self.keys.sign(&exchange_key_proof(&self.exchange)).to_bytes()),
+        }
     }
 
     /// The account id.

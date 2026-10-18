@@ -20,16 +20,20 @@ use corvo_chat_proto::{
 };
 use opaque_ke::ServerLogin;
 use tokio::{
-    sync::oneshot,
+    sync::{mpsc, oneshot},
     time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout, timeout_at},
 };
 
-use crate::{AppState, PeerAddr, accounts, hub::Kick};
+use crate::{
+    AppState, PeerAddr, accounts,
+    hub::{Kick, Push},
+};
 
 mod devices;
 mod secrets;
 mod sign_in;
 mod signup;
+mod sync;
 
 use sign_in::LoginKind;
 
@@ -110,6 +114,8 @@ enum Event {
     Ping,
     Idle,
     Kicked(Kick),
+    /// `None` when the hub let go of this connection's channel.
+    Pushed(Option<Push>),
 }
 
 /// One connection.
@@ -122,11 +128,15 @@ struct Link {
     conn: Conn,
     /// Set while signed in: the hub's way to stop this connection.
     kick: Option<oneshot::Receiver<Kick>>,
+    /// Set while signed in: new events and presence for this connection.
+    push: Option<mpsc::UnboundedReceiver<Push>>,
+    /// The last event this device has, once it has synced; pushes wait until then.
+    cursor: Option<i64>,
 }
 
 async fn run(socket: WebSocket, state: AppState, ip: IpAddr) {
     let id = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
-    let mut link = Link { socket, state, id, ip, conn: Conn::Anonymous, kick: None };
+    let mut link = Link { socket, state, id, ip, conn: Conn::Anonymous, kick: None, push: None, cursor: None };
     let anon_until = Instant::now() + ANON_TIMEOUT;
     if let Ok(Flow::Stay) = timeout_at(anon_until, link.hello()).await {
         link.serve(anon_until).await;
@@ -170,14 +180,16 @@ impl Link {
         let mut heard = Instant::now();
         loop {
             let signed_in = self.conn.session().is_some();
-            // Kicks first, then the timers, then frames: a flood of frames
-            // never keeps a signed-out device served or a deadline unchecked.
+            // Kicks first, then the timers, then pushes, then frames: a flood
+            // of frames never keeps a signed-out device served, a deadline
+            // unchecked or a device behind.
             let event = tokio::select! {
                 biased;
                 kick = kicked(&mut self.kick), if signed_in => Event::Kicked(kick),
                 _ = sleep_until(anon_until), if !signed_in => Event::AnonTimeout,
                 _ = sleep_until(heard + IDLE_TIMEOUT), if signed_in => Event::Idle,
                 _ = ping.tick(), if signed_in => Event::Ping,
+                push = pushed(&mut self.push), if signed_in => Event::Pushed(push),
                 message = self.socket.recv() => Event::Received(message),
             };
             let flow = match event {
@@ -190,6 +202,16 @@ impl Link {
                 Event::Kicked(Kick::SignedOut(reason)) => {
                     self.send(&ServerFrame::SignedOut { reason }).await;
                     Flow::Close
+                }
+                // Until it has synced, a device gets its state from the sync.
+                Event::Pushed(Some(_)) if self.cursor.is_none() => Flow::Stay,
+                Event::Pushed(Some(Push::Events)) => self.flush().await,
+                Event::Pushed(Some(Push::Presence { number, online })) => {
+                    self.send(&ServerFrame::Presence { number, online }).await
+                }
+                Event::Pushed(None) => {
+                    self.push = None;
+                    Flow::Stay
                 }
             };
             if let Flow::Close = flow {
@@ -258,6 +280,7 @@ impl Link {
             F::ListDevices => self.list_devices().await,
             F::SignOutDevice { id } => self.sign_out_device(id).await,
             F::SignOut => self.sign_out().await,
+            F::Sync { cursor } => self.sync(cursor).await,
             // The gate refuses a second hello.
             F::Hello { .. } => self.error(ErrorCode::BadFrame, "not expected now").await,
             // Chats and sync arrive in the next changes.
@@ -361,6 +384,14 @@ fn refusal(code: ErrorCode) -> &'static str {
         ErrorCode::NotAllowed => "enter your password again first",
         ErrorCode::Internal => "server error, try again",
         _ => "not expected now",
+    }
+}
+
+/// The hub's next push, or never when there's no channel.
+async fn pushed(push: &mut Option<mpsc::UnboundedReceiver<Push>>) -> Option<Push> {
+    match push {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
     }
 }
 
