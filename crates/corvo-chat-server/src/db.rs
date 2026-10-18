@@ -10,7 +10,8 @@ use rusqlite::Connection;
 pub const DB_FILE: &str = "server.db";
 
 /// Migration 1: M1's tables (accounts). Migration 2: M2's tables (chats and
-/// sync). Migration 3: where each side's current request starts.
+/// sync). Migration 3: where each side's current request starts. Migration 4:
+/// bans, deleted accounts and reports.
 const MIGRATIONS: &[&str] = &[
     "
 CREATE TABLE accounts (
@@ -101,6 +102,18 @@ CREATE TABLE pins (
     "
 ALTER TABLE chat_members ADD COLUMN request_from INTEGER NOT NULL DEFAULT 0;
 ",
+    "
+ALTER TABLE accounts ADD COLUMN banned_at INTEGER;
+ALTER TABLE accounts ADD COLUMN deleted_at INTEGER;
+CREATE TABLE reports (
+  id INTEGER PRIMARY KEY,
+  reporter_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+  reported_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  reason TEXT,
+  at INTEGER NOT NULL
+);
+CREATE INDEX reports_by_reported ON reports (reported_id);
+",
 ];
 
 /// Opens (creating if needed) the database with WAL, foreign keys and a busy
@@ -160,7 +173,7 @@ mod tests {
         migrate(&mut conn).unwrap();
         migrate(&mut conn).unwrap();
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, 3_i64);
+        assert_eq!(version, 4_i64);
     }
 
     #[test]

@@ -55,6 +55,8 @@ pub enum SignedOutReason {
     PasswordChanged,
     Recovered,
     Expired,
+    Banned,
+    AccountDeleted,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -88,6 +90,8 @@ pub enum ErrorCode {
     NumberUnknown,
     ChatUnknown,
     ChatExists,
+    Banned,
+    AccountDeleted,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -173,6 +177,10 @@ pub enum ClientFrame {
     RenameDevice { name: String },
     /// Active.
     SetPin { pin: Pin },
+    /// Active. `reason` is optional, at most 200 characters.
+    Report { number: Number, reason: Option<String>, block: bool },
+    /// Active and reauthed.
+    DeleteAccount,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -266,4 +274,5 @@ pub enum ServerFrame {
         number: Number,
         online: bool,
     },
+    Reported,
 }

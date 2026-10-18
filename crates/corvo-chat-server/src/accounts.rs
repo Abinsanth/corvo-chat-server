@@ -30,6 +30,9 @@ pub struct AccountRow {
     pub wrong_count: i64,
     pub locked_until: Option<i64>,
     pub locked_forever: bool,
+    pub banned: bool,
+    /// A tombstone: the account deleted itself.
+    pub deleted: bool,
 }
 
 impl AccountRow {
@@ -64,7 +67,8 @@ pub enum LockState {
     Forever,
 }
 
-const COLUMNS: &str = "id, username, number, display_name, pending_until, wrong_count, locked_until, locked_forever";
+const COLUMNS: &str = "id, username, number, display_name, pending_until, wrong_count, locked_until, locked_forever, \
+                       banned_at IS NOT NULL, deleted_at IS NOT NULL";
 
 fn row_to_account(r: &Row) -> rusqlite::Result<AccountRow> {
     let number: String = r.get(2)?;
@@ -78,6 +82,8 @@ fn row_to_account(r: &Row) -> rusqlite::Result<AccountRow> {
         wrong_count: r.get(5)?,
         locked_until: r.get(6)?,
         locked_forever: r.get(7)?,
+        banned: r.get(8)?,
+        deleted: r.get(9)?,
     })
 }
 
@@ -176,9 +182,20 @@ pub fn by_number(conn: &Connection, number: Number, now: i64) -> rusqlite::Resul
     find(conn, "number", number.digits(), now)
 }
 
-/// An active account by number: `None` for a pending or unknown one.
+/// An active account by number: `None` for a pending, deleted or unknown
+/// one. A banned account is returned; callers answer `banned`.
 pub fn active_by_number(conn: &Connection, number: Number, now: i64) -> rusqlite::Result<Option<AccountRow>> {
-    Ok(by_number(conn, number, now)?.filter(|row| row.pending_until.is_none()))
+    Ok(by_number(conn, number, now)?.filter(|row| row.pending_until.is_none() && !row.deleted))
+}
+
+pub fn ban(conn: &Connection, id: i64, now: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE accounts SET banned_at = ?2 WHERE id = ?1", params![id, now])?;
+    Ok(())
+}
+
+pub fn unban(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE accounts SET banned_at = NULL WHERE id = ?1", [id])?;
+    Ok(())
 }
 
 pub fn set_display_name(conn: &Connection, id: i64, name: &str) -> rusqlite::Result<()> {
@@ -284,6 +301,20 @@ mod tests {
             recovery_copy: vec![4; 40],
             public_keys: PublicKeys { signing: B64([5; 32]), exchange: B64([6; 32]), signature: B64([7; 64]) },
         }
+    }
+
+    #[test]
+    fn ban_and_unban_show_on_the_row() {
+        let mut c = conn();
+        let n = number(482_910_557);
+        let id = create_pending(&mut c, &new_account("abin-0000", n), 100, 86_400).unwrap();
+        activate(&c, id, None, 100).unwrap();
+        assert!(!by_id(&c, id, 100).unwrap().unwrap().banned);
+        ban(&c, id, 200).unwrap();
+        let row = active_by_number(&c, n, 200).unwrap().expect("a banned account is still found");
+        assert!(row.banned && !row.deleted);
+        unban(&c, id).unwrap();
+        assert!(!by_id(&c, id, 300).unwrap().unwrap().banned);
     }
 
     #[test]

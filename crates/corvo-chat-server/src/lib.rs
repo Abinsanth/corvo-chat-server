@@ -15,6 +15,7 @@ pub mod key;
 pub mod limits;
 pub mod pins;
 pub mod relations;
+pub mod reports;
 pub mod sessions;
 pub mod state;
 #[cfg(test)]
