@@ -251,6 +251,11 @@ impl Link {
                 accounts::note_success(c, account_id)?;
                 let Some(row) = accounts::by_id(c, account_id, now)? else { return Ok(SignIn::Gone) };
                 // Only now, with the password proven, may the ban show.
+                // Deleted while this login was in flight: the old record
+                // still proved, but there's no account to sign in to.
+                if row.deleted {
+                    return Ok(SignIn::Gone);
+                }
                 if row.banned {
                     return Ok(SignIn::Banned);
                 }

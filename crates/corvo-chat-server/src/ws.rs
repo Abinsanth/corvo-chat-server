@@ -110,6 +110,8 @@ enum Verdict {
     Gone,
     /// The signed-in account was banned since it signed in.
     Banned,
+    /// The signed-in account was deleted since it signed in.
+    Deleted,
 }
 
 /// What woke the loop.
@@ -251,6 +253,10 @@ impl Link {
                 self.send(&ServerFrame::SignedOut { reason: SignedOutReason::Banned }).await;
                 return Flow::Close;
             }
+            Verdict::Deleted => {
+                self.send(&ServerFrame::SignedOut { reason: SignedOutReason::AccountDeleted }).await;
+                return Flow::Close;
+            }
             Verdict::Gone => {
                 if let ClientFrame::Activate { .. } = frame {
                     return self.expired().await;
@@ -363,6 +369,7 @@ async fn gate(conn: &Conn, state: &AppState, frame: &ClientFrame) -> Verdict {
             let (id, now) = (*account_id, state.clock.now());
             let account = match state.db.call(move |c| accounts::by_id(c, id, now)).await {
                 Ok(Some(account)) if account.banned => return Verdict::Banned,
+                Ok(Some(account)) if account.deleted => return Verdict::Deleted,
                 Ok(Some(account)) => account,
                 Ok(None) => return Verdict::Gone,
                 Err(err) => {

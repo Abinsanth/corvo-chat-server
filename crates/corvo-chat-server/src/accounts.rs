@@ -188,6 +188,27 @@ pub fn active_by_number(conn: &Connection, number: Number, now: i64) -> rusqlite
     Ok(by_number(conn, number, now)?.filter(|row| row.pending_until.is_none() && !row.deleted))
 }
 
+/// Whether the account is a tombstone.
+pub fn is_deleted(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
+    Ok(conn
+        .query_row("SELECT deleted_at IS NOT NULL FROM accounts WHERE id = ?1", [id], |r| r.get(0))
+        .optional()?
+        .unwrap_or(true))
+}
+
+/// A deleted account `me` still knows (a row about it, or a chat with it),
+/// for frames that tidy up after it.
+pub fn known_tombstone(conn: &Connection, me: i64, number: Number, now: i64) -> rusqlite::Result<Option<AccountRow>> {
+    let Some(row) = by_number(conn, number, now)?.filter(|row| row.deleted && row.id != me) else { return Ok(None) };
+    let known: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM relations WHERE account_id = ?1 AND other_id = ?2)
+             OR EXISTS (SELECT 1 FROM chats WHERE low = MIN(?1, ?2) AND high = MAX(?1, ?2))",
+        params![me, row.id],
+        |r| r.get(0),
+    )?;
+    Ok(known.then_some(row))
+}
+
 /// Deletes an account as a tombstone: the row, number, username and public
 /// keys stay (the number and username are retired, and old messages still
 /// show who sent them); every secret and the display name are wiped; its
@@ -204,7 +225,9 @@ pub fn tombstone(conn: &Connection, id: i64, now: i64) -> rusqlite::Result<()> {
         "DELETE FROM invites WHERE account_id = ?1 OR inviter_id = ?1",
         "DELETE FROM pins WHERE account_id = ?1",
         "DELETE FROM events WHERE account_id = ?1",
-        "DELETE FROM relations WHERE account_id = ?1",
+        // Its contact rows stay, frozen: they're what lets the other side
+        // keep its marks.
+        "DELETE FROM relations WHERE account_id = ?1 AND state != 'contact'",
     ] {
         conn.execute(sql, [id])?;
     }

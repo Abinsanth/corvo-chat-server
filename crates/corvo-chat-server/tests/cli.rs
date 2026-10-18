@@ -275,3 +275,21 @@ fn backup_keeps_the_newest_seven() {
     assert_eq!(names.len(), 7, "{names:?}");
     assert_eq!(names[0], "server-2026-01-04.db", "the three oldest went");
 }
+
+#[test]
+fn ban_kills_the_accounts_open_invites() {
+    use corvo_chat_server::{clock::Clock, invites};
+    let dir = dir();
+    let inviter = account(&dir, "abin-0001", 100_000_001, None);
+    pending_account(&dir);
+    let pending = with_db(&dir, |c| {
+        let id: i64 = c.query_row("SELECT id FROM accounts WHERE username = 'abin-0042'", [], |r| r.get(0)).unwrap();
+        invites::create(c, id, Some(inviter), Clock::system().now(), 5).unwrap();
+        id
+    });
+    assert!(run_in(&dir, &["ban", &number(100_000_001).to_string()]).status.success());
+    let left = with_db(&dir, |c| {
+        c.query_row("SELECT COUNT(*) FROM invites WHERE account_id = ?1", [pending], |r| r.get::<_, i64>(0)).unwrap()
+    });
+    assert_eq!(left, 0, "the banned account's invite no longer works");
+}

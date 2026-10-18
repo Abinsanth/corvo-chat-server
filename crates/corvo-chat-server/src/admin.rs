@@ -114,18 +114,22 @@ pub fn tree(data_dir: &Path, number: &str) -> anyhow::Result<String> {
     Ok(out)
 }
 
-/// Bans each number and signs out its devices (the server's sweep closes
-/// any that are connected). Returns the lines for what was banned and the
+/// Bans each number, signs out its devices (the server's sweep closes any
+/// that are connected) and kills the invites it made. Returns the lines for what was banned and the
 /// errors for the rest.
 pub fn ban(data_dir: &Path, numbers: &[String]) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-    let conn = db::open(&data_dir.join(db::DB_FILE))?;
+    let mut conn = db::open(&data_dir.join(db::DB_FILE))?;
     let now = Clock::system().now();
     let (mut done, mut errors) = (Vec::new(), Vec::new());
     for number in numbers {
         match any_account(&conn, number, now) {
             Ok(row) => {
-                accounts::ban(&conn, row.id, now)?;
-                conn.execute("DELETE FROM sessions WHERE account_id = ?1", [row.id])?;
+                // The ban, its devices and its open invites go together.
+                let tx = conn.transaction()?;
+                accounts::ban(&tx, row.id, now)?;
+                tx.execute("DELETE FROM sessions WHERE account_id = ?1", [row.id])?;
+                tx.execute("DELETE FROM invites WHERE inviter_id = ?1", [row.id])?;
+                tx.commit()?;
                 done.push(format!("banned {} ({})", row.username, row.number));
             }
             Err(err) => errors.push(err.to_string()),

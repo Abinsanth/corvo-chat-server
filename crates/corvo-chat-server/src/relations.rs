@@ -62,7 +62,12 @@ pub fn rows(c: &Connection, me: i64) -> rusqlite::Result<Vec<(i64, Relation)>> {
 
 /// How many requests `me` hasn't answered.
 pub fn open_requests(c: &Connection, me: i64) -> rusqlite::Result<i64> {
-    c.query_row("SELECT COUNT(*) FROM relations WHERE account_id = ?1 AND state = 'request'", [me], |r| r.get(0))
+    c.query_row(
+        "SELECT COUNT(*) FROM relations r JOIN accounts a ON a.id = r.other_id
+         WHERE r.account_id = ?1 AND r.state = 'request' AND a.deleted_at IS NULL",
+        [me],
+        |r| r.get(0),
+    )
 }
 
 /// The accounts that are `me`'s contacts both ways.

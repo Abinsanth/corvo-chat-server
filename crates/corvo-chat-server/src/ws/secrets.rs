@@ -32,6 +32,7 @@ impl Link {
                 match accounts::by_id(c, account_id, now)? {
                     None => Ok(None),
                     // The recovery code is proven, so the ban may show.
+                    Some(row) if row.deleted => Ok(None),
                     Some(row) if row.banned => Ok(Some(Err(()))),
                     Some(_) => accounts::copy(c, account_id, Which::Recovery).map(|copy| Some(Ok(copy))),
                 }
@@ -102,6 +103,10 @@ impl Link {
             .call(move |c| -> Result<Option<Done>, String> {
                 let text = |e: rusqlite::Error| e.to_string();
                 let Some(row) = accounts::by_id(c, account_id, now).map_err(text)? else { return Ok(None) };
+                // Deleted or banned while this recovery was in flight.
+                if row.deleted || row.banned {
+                    return Ok(None);
+                }
                 let tx = c.transaction().map_err(text)?;
                 accounts::replace(&tx, account_id, Which::Password, &password_record, &password_copy.0)
                     .map_err(text)?;
