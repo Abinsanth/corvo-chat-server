@@ -260,7 +260,7 @@ out.
    the newest 7 are kept. Backups don't include `opaque.key`; keep that one
    offline as in section 3. To restore one:
    ```bash
-   sudo systemctl stop corvo-chat-backup.timer corvo-chat-server
+   sudo systemctl stop corvo-chat-backup.timer corvo-chat-backup.service corvo-chat-server
    sudo rm -f /var/lib/corvo-chat/server.db-wal /var/lib/corvo-chat/server.db-shm
    sudo -u corvo-chat cp /var/lib/corvo-chat/backups/server-YYYY-MM-DD.db /var/lib/corvo-chat/server.db
    sudo systemctl start corvo-chat-server corvo-chat-backup.timer
