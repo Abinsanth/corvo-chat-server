@@ -44,8 +44,6 @@ use sign_in::LoginKind;
 pub const PATH: &str = "/ws";
 /// The largest frame (and message) a client may send.
 pub const MAX_FRAME: usize = 128 * 1024;
-/// How long a connection may stay open without signing in.
-pub const ANON_TIMEOUT: Duration = Duration::from_secs(300);
 /// How often a signed-in connection is pinged.
 pub const PING_EVERY: Duration = Duration::from_secs(30);
 /// How long a signed-in connection may send nothing (pongs count).
@@ -144,7 +142,7 @@ struct Link {
 async fn run(socket: WebSocket, state: AppState, ip: IpAddr) {
     let id = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
     let mut link = Link { socket, state, id, ip, conn: Conn::Anonymous, kick: None, push: None, cursor: None };
-    let anon_until = Instant::now() + ANON_TIMEOUT;
+    let anon_until = Instant::now() + Duration::from_secs(link.state.limits.anon_timeout_secs);
     if let Ok(Flow::Stay) = timeout_at(anon_until, link.hello()).await {
         link.serve(anon_until).await;
     }

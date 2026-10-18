@@ -29,6 +29,8 @@ pub struct Limits {
     /// Pinned keys per account.
     pub max_pins: i64,
     pub reports_per_day: u32,
+    /// Seconds an anonymous connection may stay before signing in.
+    pub anon_timeout_secs: u64,
 }
 
 impl Default for Limits {
@@ -57,6 +59,7 @@ impl Default for Limits {
             changes_per_hour: 60,
             max_pins: 500,
             reports_per_day: 10,
+            anon_timeout_secs: 300,
         }
     }
 }
