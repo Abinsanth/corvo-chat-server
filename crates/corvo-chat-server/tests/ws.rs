@@ -2,9 +2,9 @@ mod common;
 
 use std::time::Duration;
 
-use common::client::{Client, start_server};
+use common::client::{Client, start_server, start_server_with};
 use corvo_chat_proto::frames::{ClientFrame, ErrorCode, ServerFrame};
-use corvo_chat_server::ws::{ANON_TIMEOUT, SEND_TIMEOUT};
+use corvo_chat_server::{limits::Limits, ws::SEND_TIMEOUT};
 use tokio::{net::TcpSocket, time::timeout};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -64,20 +64,13 @@ async fn garbage_frame_gets_bad_frame_and_the_connection_stays_open() {
 }
 
 #[tokio::test]
-async fn anonymous_connection_is_closed_after_five_minutes() {
-    let server = start_server().await;
+async fn anonymous_connection_is_closed_after_its_timeout() {
+    assert_eq!(Limits::default().anon_timeout_secs, 300);
+    let server = start_server_with(Limits { anon_timeout_secs: 1, ..Limits::default() }).await;
     let mut client = Client::connect(&server).await;
     client.hello().await;
-    // Let the server reach its loop in real time; a paused clock could jump
-    // ahead of it.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    tokio::time::pause();
-    assert!(!client.closed_within(Duration::from_secs(299)).await, "closed before 299 s");
-    // Step to 301 s by hand, then wait for the close in real time: left to
-    // itself, the paused clock can pass 301 s before the bytes arrive.
-    tokio::time::advance(Duration::from_secs(2)).await;
-    tokio::time::resume();
-    assert!(client.closed_within(Duration::from_millis(500)).await, "still open at 301 s");
+    assert!(!client.closed_within(Duration::from_millis(500)).await, "closed before 500 ms");
+    assert!(client.closed_within(Duration::from_secs(3)).await, "still open at 3 s");
 }
 
 #[tokio::test]
@@ -94,6 +87,6 @@ async fn client_that_never_reads_is_closed_anyway() {
     // buffers until its writes block. The paused clock moves only once every
     // task waits, so the server's deadlines are what end this.
     let spam = tokio::spawn(async move { while client.try_send_raw(Message::text("{")).await.is_ok() {} });
-    let deadline = ANON_TIMEOUT + 2 * SEND_TIMEOUT + Duration::from_secs(1);
+    let deadline = Duration::from_secs(Limits::default().anon_timeout_secs) + 2 * SEND_TIMEOUT + Duration::from_secs(1);
     timeout(deadline, spam).await.expect("closed by its deadlines").expect("the client task ends");
 }
