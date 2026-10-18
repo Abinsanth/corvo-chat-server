@@ -51,6 +51,10 @@ pub(super) struct Touched {
 
 impl Touched {
     pub(super) fn append(&mut self, c: &Connection, account: i64, ev: &Ev) -> rusqlite::Result<()> {
+        // A deleted account has no devices and no log to keep.
+        if accounts::is_deleted(c, account)? {
+            return Ok(());
+        }
         events::append(c, account, ev)?;
         self.accounts.push(account);
         Ok(())

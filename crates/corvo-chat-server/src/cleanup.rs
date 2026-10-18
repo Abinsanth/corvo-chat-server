@@ -18,9 +18,12 @@ pub struct Cleaned {
     pub sessions: Vec<i64>,
     /// The accounts those sessions belonged to.
     pub accounts: Vec<i64>,
+    /// 15-minute locks that ran out.
+    pub locks: usize,
 }
 
-/// Deletes expired pending accounts (their sessions and invite go with them),
+/// Clears locks that ran out, deletes expired pending accounts (their
+/// sessions and invite go with them),
 /// sessions idle for `device_idle_secs`, and attempts older than a day. The
 /// `online` sessions are in use, so they count as used now.
 pub fn run(conn: &mut Connection, now: i64, limits: &Limits, online: &HashSet<i64>) -> rusqlite::Result<Cleaned> {
@@ -39,8 +42,12 @@ pub fn run(conn: &mut Connection, now: i64, limits: &Limits, online: &HashSet<i6
         sessions::delete(&tx, *id)?;
     }
     attempts::prune(&tx, now - ATTEMPTS_KEEP_SECS)?;
+    let locks = tx.execute(
+        "UPDATE accounts SET locked_until = NULL WHERE locked_until IS NOT NULL AND locked_until <= ?1",
+        [now],
+    )?;
     tx.commit()?;
-    Ok(Cleaned { pending, sessions: idle, accounts })
+    Ok(Cleaned { pending, sessions: idle, accounts, locks })
 }
 
 /// One cleanup of the live server. The hub is read under the database lock,
@@ -71,7 +78,12 @@ pub fn spawn_cleanup(state: AppState) {
             tick.tick().await;
             match once(&state).await {
                 Ok(c) => {
-                    tracing::info!("cleanup: {} pending accounts, {} idle devices removed", c.pending, c.sessions.len())
+                    tracing::info!(
+                        "cleanup: {} pending accounts, {} idle devices removed, {} locks expired",
+                        c.pending,
+                        c.sessions.len(),
+                        c.locks
+                    )
                 }
                 Err(e) => tracing::error!("cleanup failed: {e}"),
             }
@@ -82,6 +94,21 @@ pub fn spawn_cleanup(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_clears_expired_locks() {
+        let mut conn = crate::testing::conn_with_accounts(2);
+        let now = 10_000;
+        conn.execute("UPDATE accounts SET locked_until = ?2 WHERE id = ?1", [1, now - 1]).unwrap();
+        conn.execute("UPDATE accounts SET locked_until = ?2 WHERE id = ?1", [2, now + 1]).unwrap();
+        let cleaned = run(&mut conn, now, &Limits::default(), &HashSet::new()).unwrap();
+        assert_eq!(cleaned.locks, 1);
+        let lock = |id: i64| {
+            conn.query_row("SELECT locked_until FROM accounts WHERE id = ?1", [id], |r| r.get::<_, Option<i64>>(0))
+                .unwrap()
+        };
+        assert_eq!((lock(1), lock(2)), (None, Some(now + 1)));
+    }
 
     #[test]
     fn cleanup_removes_expired_pending_idle_sessions_and_old_attempts() {

@@ -238,3 +238,58 @@ fn unban_lifts_a_ban() {
     });
     assert!(!banned);
 }
+
+#[test]
+fn backup_writes_a_readable_copy() {
+    let dir = dir();
+    account(&dir, "abin-0001", 100_000_001, None);
+    let out = run_in(&dir, &["backup"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let printed = stdout(&out);
+    let path = printed.trim().strip_prefix("backed up to ").expect("the path is printed");
+    let path = std::path::Path::new(path);
+    assert!(path.starts_with(dir.path().join("backups")));
+    let copy = rusqlite::Connection::open(path).expect("the copy opens");
+    let accounts: i64 = copy.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0)).unwrap();
+    assert_eq!(accounts, 1);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+}
+
+#[test]
+fn backup_keeps_the_newest_seven() {
+    let dir = dir();
+    account(&dir, "abin-0001", 100_000_001, None);
+    let backups = dir.path().join("backups");
+    std::fs::create_dir_all(&backups).unwrap();
+    for day in 1..=9 {
+        std::fs::write(backups.join(format!("server-2026-01-0{day}.db")), b"old").unwrap();
+    }
+    assert!(run_in(&dir, &["backup"]).status.success());
+    let mut names: Vec<String> =
+        std::fs::read_dir(&backups).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names.len(), 7, "{names:?}");
+    assert_eq!(names[0], "server-2026-01-04.db", "the three oldest went");
+}
+
+#[test]
+fn ban_kills_the_accounts_open_invites() {
+    use corvo_chat_server::{clock::Clock, invites};
+    let dir = dir();
+    let inviter = account(&dir, "abin-0001", 100_000_001, None);
+    pending_account(&dir);
+    let pending = with_db(&dir, |c| {
+        let id: i64 = c.query_row("SELECT id FROM accounts WHERE username = 'abin-0042'", [], |r| r.get(0)).unwrap();
+        invites::create(c, id, Some(inviter), Clock::system().now(), 5).unwrap();
+        id
+    });
+    assert!(run_in(&dir, &["ban", &number(100_000_001).to_string()]).status.success());
+    let left = with_db(&dir, |c| {
+        c.query_row("SELECT COUNT(*) FROM invites WHERE account_id = ?1", [pending], |r| r.get::<_, i64>(0)).unwrap()
+    });
+    assert_eq!(left, 0, "the banned account's invite no longer works");
+}

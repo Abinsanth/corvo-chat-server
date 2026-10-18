@@ -101,3 +101,87 @@ async fn deleted_account_keeps_no_secrets() {
     }
     assert_eq!(count(&server, "SELECT deleted_at IS NOT NULL FROM accounts WHERE id = ?1", id).await, 1);
 }
+
+#[tokio::test]
+async fn the_other_side_can_still_clear_and_drop_a_deleted_contact() {
+    use corvo_chat_proto::chat::{EventBody, Relation};
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = contacts(&server).await;
+    first_message(&mut a, &abin, rahul.number).await;
+    delete(&mut a, &abin).await;
+    b.drain().await;
+    b.send(&ClientFrame::Remove { number: abin.number, clear_history: true }).await;
+    loop {
+        if let EventBody::Cleared { .. } = b.next_event().await.event {
+            break;
+        }
+    }
+    assert_eq!(b.next_person(abin.number).await.relation, Relation::None);
+}
+
+#[tokio::test]
+async fn requests_from_a_deleted_account_can_be_rejected_and_dont_count() {
+    use corvo_chat_proto::chat::Relation;
+    use corvo_chat_server::relations;
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = common::chat::strangers(&server).await;
+    first_message(&mut a, &abin, rahul.number).await;
+    delete(&mut a, &abin).await;
+    let b_id = rahul.id(&server).await;
+    assert_eq!(server.state.db.call(move |c| relations::open_requests(c, b_id).unwrap()).await, 0);
+    b.drain().await;
+    b.send(&ClientFrame::Reject { number: abin.number }).await;
+    assert_eq!(b.next_person(abin.number).await.relation, Relation::None);
+}
+
+#[tokio::test]
+async fn the_other_side_keeps_its_marks_after_a_delete() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = contacts(&server).await;
+    let chat_id = first_message(&mut b, &rahul, abin.number).await;
+    a.send(&ClientFrame::Read { chat_id, through: 1 }).await;
+    a.drain().await;
+    delete(&mut a, &abin).await;
+    let (mut fresh, _) = rahul.sign_in(&server, &device("fresh")).await;
+    let chats = fresh.sync_from(None).await.snapshot.expect("a snapshot").chats;
+    let marks = chats[0].marks.clone().expect("marks survive the delete");
+    assert_eq!((marks.received_through, marks.read_through), (1, 1));
+}
+
+#[tokio::test]
+async fn a_login_or_recovery_in_flight_across_a_delete_fails() {
+    use common::client::{login_finish, login_start};
+    use common::person::{recover, reregister};
+    let server = start_server().await;
+    let (abin, mut a) = Person::active(&server, "abin").await;
+    // A sign-in that got its offer before the delete.
+    let mut x = Client::open(&server).await;
+    let (state, request) = login_start(&abin.password);
+    x.send(&ClientFrame::LoginStart { username: abin.username.clone(), request, device: device("x") }).await;
+    let ServerFrame::LoginOffer { response } = x.recv().await else { panic!("expected an offer") };
+    // A recovery that got its copy before the delete.
+    let mut y = Client::open(&server).await;
+    let recovery = recover(&mut y, &abin.username, &abin.recovery, &device("y")).await;
+    assert!(matches!(recovery, Outcome::Server(ServerFrame::RecoveryOffer { .. })));
+
+    delete(&mut a, &abin).await;
+
+    let (finalization, _) = login_finish(state, &abin.password, response).expect("the old record still matches");
+    x.send(&ClientFrame::LoginFinish { finalization }).await;
+    assert_error(x.recv().await, ErrorCode::WrongCredentials);
+    let (pw, rc) = reregister(&mut y, Some("new password"), Some("new code")).await;
+    y.send(&ClientFrame::RecoveryComplete {
+        password: pw.unwrap(),
+        recovery: rc.unwrap(),
+        password_copy: corvo_chat_proto::Blob(vec![1; 40]),
+        recovery_copy: corvo_chat_proto::Blob(vec![2; 40]),
+    })
+    .await;
+    assert_error(y.recv().await, ErrorCode::WrongCredentials);
+    let id = abin.id(&server).await;
+    assert_eq!(count(&server, "SELECT COUNT(*) FROM sessions WHERE account_id = ?1", id).await, 0);
+    assert_eq!(
+        count(&server, "SELECT length(password_record) + length(password_copy) FROM accounts WHERE id = ?1", id).await,
+        0
+    );
+}

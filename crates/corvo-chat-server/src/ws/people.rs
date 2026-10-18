@@ -83,6 +83,9 @@ fn change(
     let mine = relations::get(c, me, other)?;
     let mutual = mine == Relation::Contact && relations::get(c, other, me)? == Relation::Contact;
     let seen = match what {
+        Change::Accept if accounts::is_deleted(c, other)? => {
+            return Ok(Err((ErrorCode::NotAllowed, "That account was deleted.")));
+        }
         Change::Accept => {
             if mine != Relation::Request {
                 return Ok(Err((ErrorCode::NotAllowed, "No request from that number.")));
@@ -145,7 +148,10 @@ impl Link {
             .state
             .db
             .call(move |c| -> rusqlite::Result<Result<(), Refusal>> {
-                let other = accounts::active_by_number(c, number, now)?.filter(|row| row.id != me);
+                let other = match accounts::active_by_number(c, number, now)?.filter(|row| row.id != me) {
+                    Some(other) => Some(other),
+                    None => accounts::known_tombstone(c, me, number, now)?,
+                };
                 // Finding out whether a number exists costs a lookup, known or not.
                 let stranger = match &other {
                     Some(other) => relations::get(c, me, other.id)? == Relation::None,
@@ -327,7 +333,10 @@ impl Link {
             .state
             .db
             .call(move |c| -> rusqlite::Result<Result<(), Refusal>> {
-                let other = accounts::active_by_number(c, number, now)?.filter(|row| row.id != me);
+                let other = match accounts::active_by_number(c, number, now)?.filter(|row| row.id != me) {
+                    Some(other) => Some(other),
+                    None => accounts::known_tombstone(c, me, number, now)?,
+                };
                 let stranger = match &other {
                     Some(other) => relations::get(c, me, other.id)? == Relation::None,
                     None => true,

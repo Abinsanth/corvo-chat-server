@@ -162,6 +162,26 @@ service runs.
   ```
   Then `sudo systemctl restart corvo-chat-server`.
 
+### Reports and bans
+
+People report others from their client. On the server:
+```bash
+sudo -u corvo-chat /usr/local/bin/corvo-chat-server stats
+sudo -u corvo-chat /usr/local/bin/corvo-chat-server tree <number>
+sudo -u corvo-chat /usr/local/bin/corvo-chat-server ban <number> [<number>...]
+sudo -u corvo-chat /usr/local/bin/corvo-chat-server unban <number>
+```
+- `stats` lists reported accounts, most reports first, with the time of
+  the last one.
+- `tree` shows who invited an account (up to an account you activated) and
+  everyone it invited, two spaces deeper per level; the account itself is
+  marked `*`.
+- `ban` signs out every device of each account (connected ones within a
+  minute) and refuses them from then on: they're told `This account has been
+  banned.` once they enter their right password. An unknown number is
+  reported and makes the exit code 1; the others are still banned.
+- `unban` lets the account sign in again.
+
 Clients talk to the server as [docs/protocol.md](protocol.md) describes.
 
 ## 6. Updating
@@ -174,7 +194,74 @@ sudo systemctl restart corvo-chat-server
 curl -sS https://chat.example.com/
 ```
 
-## 7. Troubleshooting
+## 7. Hardening
+
+Do these once, after the server works. Keep a second SSH session open while
+you change anything about SSH or the firewall, so a mistake can't lock you
+out.
+
+1. **Firewall: only 22 and 443 in.**
+   - In your provider's list, remove every inbound rule except TCP 22 and
+     TCP 443.
+   - On the server, `sudo iptables -S INPUT` should accept only `22`, `443`,
+     established traffic and loopback, then end in a `REJECT` or `DROP`.
+     Remove anything else with `sudo iptables -D INPUT <rule>` and save with
+     `sudo netfilter-persistent save`.
+2. **SSH keys only.**
+   ```bash
+   sudo sshd -T | grep -E '^(passwordauthentication|permitrootlogin|kbdinteractiveauthentication)'
+   ```
+   Expected: `passwordauthentication no`, `kbdinteractiveauthentication no`
+   and `permitrootlogin no` (or `prohibit-password`). If not, make
+   `/etc/ssh/sshd_config.d/10-hardening.conf` with
+   ```
+   PasswordAuthentication no
+   KbdInteractiveAuthentication no
+   PermitRootLogin no
+   ```
+   then `sudo sshd -t && sudo systemctl reload ssh`, and check you can still
+   log in from a new terminal before closing the old one.
+3. **Unattended security updates.**
+   ```bash
+   sudo apt install unattended-upgrades
+   sudo dpkg-reconfigure -plow unattended-upgrades
+   systemctl status unattended-upgrades --no-pager
+   ```
+   Expected: `active (running)`.
+4. **The sandboxed service.** The unit in `deploy/` locks the server down
+   (no devices, no kernel knobs, a syscall filter, only network and Unix
+   sockets). After installing a new copy of it:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl restart corvo-chat-server
+   systemd-analyze security corvo-chat-server --no-pager | tail -1
+   ```
+   The last line gives an exposure score; lower is better, and with this
+   unit it should say `OK` or `MEDIUM`. If the service won't start after an
+   update and the journal mentions `SIGSYS`, a syscall filter line is too
+   strict: tell the maintainers which one.
+5. **Daily backups.** Copy `deploy/corvo-chat-backup.service` and
+   `deploy/corvo-chat-backup.timer` to the server like the main unit, then:
+   ```bash
+   sudo install -m 644 /tmp/corvo-chat-backup.service /tmp/corvo-chat-backup.timer /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now corvo-chat-backup.timer
+   systemctl list-timers corvo-chat-backup.timer --no-pager
+   sudo systemctl start corvo-chat-backup
+   sudo ls -l /var/lib/corvo-chat/backups/
+   ```
+   Each day makes `server-YYYY-MM-DD.db` (readable only by `corvo-chat`), and
+   the newest 7 are kept. Backups don't include `opaque.key`; keep that one
+   offline as in section 3. To restore one:
+   ```bash
+   sudo systemctl stop corvo-chat-server
+   sudo -u corvo-chat cp /var/lib/corvo-chat/backups/server-YYYY-MM-DD.db /var/lib/corvo-chat/server.db
+   sudo rm -f /var/lib/corvo-chat/server.db-wal /var/lib/corvo-chat/server.db-shm
+   sudo systemctl start corvo-chat-server
+   ```
+   Everything after that backup (new accounts, messages) is lost.
+
+## 8. Troubleshooting
 
 - **`no opaque.key in /var/lib/corvo-chat: run "corvo-chat-server keygen"
   first`** in the journal: the server has no key yet. On a server that has
