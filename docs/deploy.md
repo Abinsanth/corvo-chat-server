@@ -206,7 +206,12 @@ out.
    - On the server, `sudo iptables -S INPUT` should accept only `22`, `443`,
      established traffic and loopback, then end in a `REJECT` or `DROP`.
      Remove anything else with `sudo iptables -D INPUT <rule>` and save with
-     `sudo netfilter-persistent save`.
+     `sudo netfilter-persistent save`. If `netfilter-persistent` is missing,
+     run `sudo apt install iptables-persistent` first.
+   - IPv6: `ip -6 addr show scope global` prints nothing when the server
+     has no public IPv6 address, and then there's nothing to do. Otherwise
+     `sudo ip6tables -S INPUT` must allow the same (22, 443, established,
+     loopback, then a `REJECT` or `DROP`), saved the same way.
 2. **SSH keys only.**
    ```bash
    sudo sshd -T | grep -E '^(passwordauthentication|permitrootlogin|kbdinteractiveauthentication)'
@@ -236,10 +241,11 @@ out.
    sudo systemctl restart corvo-chat-server
    systemd-analyze security corvo-chat-server --no-pager | tail -1
    ```
-   The last line gives an exposure score; lower is better, and with this
-   unit it should say `OK` or `MEDIUM`. If the service won't start after an
-   update and the journal mentions `SIGSYS`, a syscall filter line is too
-   strict: tell the maintainers which one.
+   The last line gives an exposure score; lower is better. Expect `OK` or
+   `MEDIUM`. If it says `EXPOSED` or `UNSAFE`, the new unit isn't loaded:
+   check `systemctl cat corvo-chat-server`. A syscall the filter blocks
+   fails with "Operation not permitted" instead of killing the server; if
+   the journal shows that after an update, tell the maintainers what failed.
 5. **Daily backups.** Copy `deploy/corvo-chat-backup.service` and
    `deploy/corvo-chat-backup.timer` to the server like the main unit, then:
    ```bash
@@ -254,12 +260,14 @@ out.
    the newest 7 are kept. Backups don't include `opaque.key`; keep that one
    offline as in section 3. To restore one:
    ```bash
-   sudo systemctl stop corvo-chat-server
-   sudo -u corvo-chat cp /var/lib/corvo-chat/backups/server-YYYY-MM-DD.db /var/lib/corvo-chat/server.db
+   sudo systemctl stop corvo-chat-backup.timer corvo-chat-backup.service corvo-chat-server
    sudo rm -f /var/lib/corvo-chat/server.db-wal /var/lib/corvo-chat/server.db-shm
-   sudo systemctl start corvo-chat-server
+   sudo -u corvo-chat cp /var/lib/corvo-chat/backups/server-YYYY-MM-DD.db /var/lib/corvo-chat/server.db
+   sudo systemctl start corvo-chat-server corvo-chat-backup.timer
    ```
-   Everything after that backup (new accounts, messages) is lost.
+   Everything after that backup (new accounts, messages) is lost, and admin
+   changes are turned back too: accounts deleted since come back, and bans
+   made since are lifted. Run those `ban` commands again.
 
 ## 8. Troubleshooting
 

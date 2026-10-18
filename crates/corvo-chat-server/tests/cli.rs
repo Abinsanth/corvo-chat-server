@@ -277,6 +277,67 @@ fn backup_keeps_the_newest_seven() {
 }
 
 #[test]
+fn backup_refuses_keep_zero() {
+    let dir = dir();
+    account(&dir, "abin-0001", 100_000_001, None);
+    let out = run_in(&dir, &["backup", "--keep", "0"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--keep must be at least 1"));
+    assert!(!dir.path().join("backups").exists());
+}
+
+#[test]
+fn backup_refuses_a_missing_database() {
+    let dir = dir();
+    let out = run_in(&dir, &["backup"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no server.db in"));
+    assert!(!dir.path().join("server.db").exists());
+}
+
+#[test]
+fn backup_leaves_the_database_unmigrated() {
+    let dir = dir();
+    let source = dir.path().join("server.db");
+    rusqlite::Connection::open(&source).unwrap().execute_batch("CREATE TABLE t (x)").unwrap();
+    let out = run_in(&dir, &["backup"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let source = rusqlite::Connection::open(&source).unwrap();
+    let version: i64 = source.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(version, 0);
+    let tables = |c: &rusqlite::Connection| -> Vec<String> {
+        let mut stmt = c.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+    };
+    assert_eq!(tables(&source), vec!["t"]);
+    let printed = stdout(&out);
+    let copy = rusqlite::Connection::open(printed.trim().strip_prefix("backed up to ").unwrap()).unwrap();
+    assert_eq!(tables(&copy), vec!["t"]);
+}
+
+#[test]
+fn backup_replaces_a_stale_tmp() {
+    let dir = dir();
+    account(&dir, "abin-0001", 100_000_001, None);
+    let out = run_in(&dir, &["backup"]);
+    assert!(out.status.success());
+    let printed = stdout(&out);
+    let path = std::path::PathBuf::from(printed.trim().strip_prefix("backed up to ").unwrap());
+    std::fs::write(path.with_extension("db.tmp"), b"junk").unwrap();
+    let out = run_in(&dir, &["backup"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let copy = rusqlite::Connection::open(&path).unwrap();
+    let accounts: i64 = copy.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0)).unwrap();
+    assert_eq!(accounts, 1);
+    let left: Vec<_> = std::fs::read_dir(dir.path().join("backups"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
 fn ban_kills_the_accounts_open_invites() {
     use corvo_chat_server::{clock::Clock, invites};
     let dir = dir();
