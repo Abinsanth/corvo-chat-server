@@ -295,11 +295,15 @@ pub fn start_request(c: &Connection, id: &[u8; 16], viewer: i64, seq: i64) -> ru
     Ok(())
 }
 
+/// A sender's withheld seqs in a chat; the partial index `messages_withheld`
+/// covers it.
+const WITHHELD_SQL: &str =
+    "SELECT seq FROM messages WHERE chat_id = ?1 AND sender_id = ?2 AND withheld = 1 ORDER BY seq";
+
 /// The sender's withheld messages in the chat, merged into inclusive runs
 /// of consecutive seqs.
 pub fn withheld_ranges(c: &Connection, id: &[u8; 16], sender: i64) -> rusqlite::Result<Vec<[i64; 2]>> {
-    let mut stmt =
-        c.prepare("SELECT seq FROM messages WHERE chat_id = ?1 AND sender_id = ?2 AND withheld = 1 ORDER BY seq")?;
+    let mut stmt = c.prepare(WITHHELD_SQL)?;
     let mut ranges: Vec<[i64; 2]> = Vec::new();
     for seq in stmt.query_map(params![id.as_slice(), sender], |r| r.get::<_, i64>(0))? {
         let seq = seq?;
@@ -465,6 +469,15 @@ mod tests {
         send(&c, 2, 10, true);
         assert_eq!(withheld_ranges(&c, &[1; 16], 1).unwrap(), vec![[3, 5], [9, 9]]);
         assert_eq!(withheld_ranges(&c, &[1; 16], 2).unwrap(), vec![[10, 10]]);
+    }
+
+    #[test]
+    fn withheld_ranges_uses_the_partial_index() {
+        let c = conn();
+        let plan: String = c
+            .query_row(&format!("EXPLAIN QUERY PLAN {WITHHELD_SQL}"), params![[1u8; 16].as_slice(), 1], |r| r.get(3))
+            .unwrap();
+        assert!(plan.contains("messages_withheld"), "{plan}");
     }
 
     #[test]

@@ -366,8 +366,9 @@ S: sent      {chat_id, msg_id, seq, sent_at}
   side's first message made you a request, `accept` first, or the resend
   gets `not_allowed`.
 - **Resending** after a reconnect (the same `msg_id` in the same chat)
-  returns the first `sent` and stores nothing new. Messages marked `○` can
-  always be resent.
+  returns the first `sent` and stores nothing new, even if the other
+  account was banned or deleted since. Messages marked `○` can always be
+  resent.
 - `seq` numbers a chat's messages from 1.
 - **Withheld:** a message to someone who blocked you, or beyond the request
   limits, still gets `sent`, but never reaches them. It stays `·`.

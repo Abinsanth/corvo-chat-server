@@ -48,6 +48,65 @@ async fn banned_device_is_signed_out_by_the_sweep() {
     assert!(b.closed().await);
 }
 
+async fn sql(server: &TestServer, sql: &'static str, id: i64) {
+    server.state.db.call(move |c| c.execute(sql, [id]).unwrap()).await;
+}
+
+#[tokio::test]
+async fn sweep_signs_out_a_device_whose_session_is_gone() {
+    let server = start_server().await;
+    let (rahul, mut b) = Person::active(&server, "rahul").await;
+    sql(&server, "DELETE FROM sessions WHERE account_id = ?1", rahul.id(&server).await).await;
+    assert_eq!(sweep::once(&server.state).await.unwrap(), 1);
+    assert_eq!(b.recv_raw().await, ServerFrame::SignedOut { reason: SignedOutReason::Expired });
+    assert!(b.closed().await);
+}
+
+#[tokio::test]
+async fn sweep_signs_out_a_banned_account_that_kept_its_session() {
+    let server = start_server().await;
+    let (rahul, mut b) = Person::active(&server, "rahul").await;
+    let (id, now) = (rahul.id(&server).await, server.state.clock.now());
+    server.state.db.call(move |c| accounts::ban(c, id, now).unwrap()).await;
+    assert_eq!(sweep::once(&server.state).await.unwrap(), 1);
+    assert_signed_out_banned(b.recv_raw().await);
+    assert!(b.closed().await);
+}
+
+#[tokio::test]
+async fn sweep_signs_out_a_deleted_account() {
+    let server = start_server().await;
+    let (rahul, mut b) = Person::active(&server, "rahul").await;
+    sql(&server, "UPDATE accounts SET deleted_at = 1 WHERE id = ?1", rahul.id(&server).await).await;
+    assert_eq!(sweep::once(&server.state).await.unwrap(), 1);
+    assert_eq!(b.recv_raw().await, ServerFrame::SignedOut { reason: SignedOutReason::AccountDeleted });
+    assert!(b.closed().await);
+}
+
+#[tokio::test]
+async fn sweep_leaves_a_healthy_device_alone() {
+    let server = start_server().await;
+    let (_rahul, mut b) = Person::active(&server, "rahul").await;
+    assert_eq!(sweep::once(&server.state).await.unwrap(), 0);
+    assert!(b.quiet().await);
+}
+
+#[tokio::test]
+async fn resend_after_a_ban_gets_the_stored_copy() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, _b) = contacts(&server).await;
+    let chat_id = first_message(&mut a, &abin, rahul.number).await;
+    let msg_id = random_id();
+    let first = a.send_with_id(&chat_id, &msg_id, b"x".to_vec(), None).await;
+    assert!(matches!(first, ServerFrame::Sent { seq: 2, .. }), "{first:?}");
+    ban(&server, &rahul).await;
+    assert_eq!(a.send_with_id(&chat_id, &msg_id, b"x".to_vec(), None).await, first);
+    match a.send_body(&chat_id, b"y".to_vec(), None).await {
+        ServerFrame::NotSent { code, .. } => assert_eq!(code, ErrorCode::Banned),
+        other => panic!("expected not_sent banned, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn banned_devices_next_frame_signs_it_out() {
     let server = start_server().await;
@@ -138,4 +197,36 @@ async fn eleventh_report_in_a_day_is_refused() {
         assert_eq!(report(&mut b, abin.number, None, false).await, ServerFrame::Reported);
     }
     assert_error(report(&mut b, abin.number, None, false).await, ErrorCode::RateLimited);
+}
+
+#[tokio::test]
+async fn refused_report_charges_no_lookup() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, _b) = common::chat::strangers(&server).await;
+    for _ in 0..10 {
+        assert_eq!(report(&mut a, rahul.number, None, false).await, ServerFrame::Reported);
+    }
+    assert_error(report(&mut a, rahul.number, None, false).await, ErrorCode::RateLimited);
+    let key = abin.id(&server).await.to_string();
+    let lookups: i64 = server
+        .state
+        .db
+        .call(move |c| {
+            c.query_row("SELECT COUNT(*) FROM attempts WHERE kind = 'lookup' AND key = ?1", [key], |r| r.get(0))
+                .unwrap()
+        })
+        .await;
+    assert_eq!(lookups, 10);
+}
+
+#[tokio::test]
+async fn blocking_still_works_after_the_days_reports() {
+    use corvo_chat_proto::chat::Relation;
+    let server = start_server().await;
+    let (abin, _a, _rahul, mut b) = contacts(&server).await;
+    for _ in 0..10 {
+        assert_eq!(report(&mut b, abin.number, None, false).await, ServerFrame::Reported);
+    }
+    b.send(&ClientFrame::Block { number: abin.number }).await;
+    assert_eq!(b.next_person(abin.number).await.relation, Relation::Blocked);
 }
