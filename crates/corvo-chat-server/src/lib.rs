@@ -27,7 +27,7 @@ pub mod ws;
 use axum::{Router, routing::get};
 
 pub use state::AppState;
-pub use tls::{HANDSHAKE_TIMEOUT, HEADER_TIMEOUT, PeerAddr, Tls, serve};
+pub use tls::{HANDSHAKE_TIMEOUT, HEADER_TIMEOUT, PeerAddr, Timeouts, Tls, serve, serve_with};
 
 /// Every route the server answers.
 pub fn app(state: AppState) -> Router {

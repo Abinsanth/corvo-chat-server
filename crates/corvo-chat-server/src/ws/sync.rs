@@ -366,7 +366,7 @@ impl Link {
         let Some(viewer) = self.viewer() else {
             return self.error(ErrorCode::NotSignedIn, "sign in first").await;
         };
-        let limit = (limit as usize).min(self.state.limits.snapshot_messages);
+        let limit = (limit as usize).clamp(1, self.state.limits.snapshot_messages);
         let chat = chat_id.0;
         let page = self.state.db.call(move |c| history_page(c, viewer, &chat, before, limit)).await;
         match page {

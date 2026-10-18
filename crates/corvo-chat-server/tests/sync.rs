@@ -256,3 +256,10 @@ async fn big_histories_are_split_by_bytes() {
     assert!(older.len() < 12 && older.last() == Some(&(messages[0].seq - 1)));
     let _ = done;
 }
+
+#[tokio::test]
+async fn history_with_limit_zero_returns_one() {
+    let server = start_server().await;
+    let (_abin, _a, _rahul, mut b, chat_id) = long_chat(&server).await;
+    assert_eq!(history(&mut b, &chat_id, i64::MAX, 0).await, (vec![120], false));
+}

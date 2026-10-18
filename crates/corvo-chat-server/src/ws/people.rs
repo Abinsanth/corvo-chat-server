@@ -187,21 +187,20 @@ impl Link {
 }
 
 /// An invite was used: the inviter and the new account become contacts and
-/// see each other online. Runs inside the activation's `Db::call`.
+/// see each other online. Runs inside the activation's transaction; the
+/// caller pokes `touched` after the commit.
 pub(super) fn befriend_on_activation(
     c: &Connection,
-    hub: &Hub,
     me: (i64, Number),
     inviter: i64,
     now: i64,
+    touched: &mut Touched,
 ) -> rusqlite::Result<()> {
     let Some(inviter_row) = accounts::by_id(c, inviter, now)? else { return Ok(()) };
     relations::befriend(c, me.0, inviter, now)?;
-    let mut touched = Touched::default();
     touched.append(c, me.0, &Ev::Person { other: inviter })?;
     touched.append(c, inviter, &Ev::Person { other: me.0 })?;
-    touched.poke(hub);
-    announce_pair(hub, me, (inviter, inviter_row.number), true);
+    touched.show(me, (inviter, inviter_row.number));
     Ok(())
 }
 
