@@ -48,6 +48,49 @@ async fn banned_device_is_signed_out_by_the_sweep() {
     assert!(b.closed().await);
 }
 
+async fn sql(server: &TestServer, sql: &'static str, id: i64) {
+    server.state.db.call(move |c| c.execute(sql, [id]).unwrap()).await;
+}
+
+#[tokio::test]
+async fn sweep_signs_out_a_device_whose_session_is_gone() {
+    let server = start_server().await;
+    let (rahul, mut b) = Person::active(&server, "rahul").await;
+    sql(&server, "DELETE FROM sessions WHERE account_id = ?1", rahul.id(&server).await).await;
+    assert_eq!(sweep::once(&server.state).await.unwrap(), 1);
+    assert_eq!(b.recv_raw().await, ServerFrame::SignedOut { reason: SignedOutReason::Expired });
+    assert!(b.closed().await);
+}
+
+#[tokio::test]
+async fn sweep_signs_out_a_banned_account_that_kept_its_session() {
+    let server = start_server().await;
+    let (rahul, mut b) = Person::active(&server, "rahul").await;
+    let (id, now) = (rahul.id(&server).await, server.state.clock.now());
+    server.state.db.call(move |c| accounts::ban(c, id, now).unwrap()).await;
+    assert_eq!(sweep::once(&server.state).await.unwrap(), 1);
+    assert_signed_out_banned(b.recv_raw().await);
+    assert!(b.closed().await);
+}
+
+#[tokio::test]
+async fn sweep_signs_out_a_deleted_account() {
+    let server = start_server().await;
+    let (rahul, mut b) = Person::active(&server, "rahul").await;
+    sql(&server, "UPDATE accounts SET deleted_at = 1 WHERE id = ?1", rahul.id(&server).await).await;
+    assert_eq!(sweep::once(&server.state).await.unwrap(), 1);
+    assert_eq!(b.recv_raw().await, ServerFrame::SignedOut { reason: SignedOutReason::AccountDeleted });
+    assert!(b.closed().await);
+}
+
+#[tokio::test]
+async fn sweep_leaves_a_healthy_device_alone() {
+    let server = start_server().await;
+    let (_rahul, mut b) = Person::active(&server, "rahul").await;
+    assert_eq!(sweep::once(&server.state).await.unwrap(), 0);
+    assert!(b.quiet().await);
+}
+
 #[tokio::test]
 async fn banned_devices_next_frame_signs_it_out() {
     let server = start_server().await;
