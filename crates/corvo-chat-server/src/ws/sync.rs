@@ -58,10 +58,13 @@ fn marks(c: &Connection, chat: &ChatRow, viewer: i64) -> rusqlite::Result<Option
     if !relations::shows_marks(c, other, viewer)? {
         return Ok(None);
     }
+    // Only now that marks are shared may the viewer learn which of its own
+    // messages never arrived, so they stay `·`.
+    let withheld = chats::withheld_ranges(c, &chat.id, viewer)?;
     Ok(chats::member(c, &chat.id, other)?.map(|m| Marks {
         received_through: m.received_through,
         read_through: m.read_through,
-        withheld: Vec::new(),
+        withheld,
     }))
 }
 

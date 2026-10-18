@@ -295,6 +295,22 @@ pub fn start_request(c: &Connection, id: &[u8; 16], viewer: i64, seq: i64) -> ru
     Ok(())
 }
 
+/// The sender's withheld messages in the chat, merged into inclusive runs
+/// of consecutive seqs.
+pub fn withheld_ranges(c: &Connection, id: &[u8; 16], sender: i64) -> rusqlite::Result<Vec<[i64; 2]>> {
+    let mut stmt =
+        c.prepare("SELECT seq FROM messages WHERE chat_id = ?1 AND sender_id = ?2 AND withheld = 1 ORDER BY seq")?;
+    let mut ranges: Vec<[i64; 2]> = Vec::new();
+    for seq in stmt.query_map(params![id.as_slice(), sender], |r| r.get::<_, i64>(0))? {
+        let seq = seq?;
+        match ranges.last_mut() {
+            Some(last) if last[1] + 1 == seq => last[1] = seq,
+            _ => ranges.push([seq, seq]),
+        }
+    }
+    Ok(ranges)
+}
+
 /// The highest seq `through` may name: the chat's last.
 fn clamp(c: &Connection, id: &[u8; 16], through: i64) -> rusqlite::Result<i64> {
     let last: i64 = c.query_row("SELECT last_seq FROM chats WHERE id = ?1", [id.as_slice()], |r| r.get(0))?;
@@ -437,6 +453,18 @@ mod tests {
         send(&c, 1, 6, false);
         start_request(&c, &[1; 16], 2, 6).unwrap();
         assert_eq!(request_messages(&c, &[1; 16], 1, 2).unwrap(), 1);
+    }
+
+    #[test]
+    fn withheld_ranges_merge_consecutive_seqs() {
+        let c = conn();
+        chat(&c, 1, 1, 2).unwrap();
+        for n in 1..=9u8 {
+            send(&c, 1, n, matches!(n, 3 | 4 | 5 | 9));
+        }
+        send(&c, 2, 10, true);
+        assert_eq!(withheld_ranges(&c, &[1; 16], 1).unwrap(), vec![[3, 5], [9, 9]]);
+        assert_eq!(withheld_ranges(&c, &[1; 16], 2).unwrap(), vec![[10, 10]]);
     }
 
     #[test]

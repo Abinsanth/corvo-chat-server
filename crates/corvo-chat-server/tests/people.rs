@@ -265,3 +265,47 @@ async fn people_who_ask_each_other_see_each_other_online() {
     assert_eq!(a.next_presence().await, (rahul.number, true));
     assert_eq!(b.next_presence().await, (abin.number, true));
 }
+
+/// The next `marks` event, skipping other events.
+async fn next_marks(client: &mut Client) -> Marks {
+    match wait_for(client, |e| matches!(e, EventBody::Marks { .. })).await {
+        EventBody::Marks { marks, .. } => marks,
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn withheld_ranges_appear_only_with_marks() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = strangers(&server).await;
+    let chat_id = first_message(&mut a, &abin, rahul.number).await;
+    for _ in 2..=21 {
+        a.send_body(&chat_id, b"x".to_vec(), None).await;
+    }
+    a.drain().await;
+    b.send(&ClientFrame::Read { chat_id: chat_id.clone(), through: 21 }).await;
+    assert!(a.quiet().await, "no marks, so no withheld ranges, while it's a request");
+    act(&mut b, accept(abin.number)).await;
+    assert_eq!(next_marks(&mut a).await.withheld, vec![[21, 21]]);
+    let (mut fresh, _) = rahul.sign_in(&server, &device("fresh")).await;
+    let chats = fresh.sync_from(None).await.snapshot.expect("a snapshot").chats;
+    assert_eq!(chats[0].marks.as_ref().map(|m| m.withheld.clone()), Some(vec![]), "Rahul's own messages all arrived");
+}
+
+#[tokio::test]
+async fn messages_sent_while_blocked_stay_withheld_after_reconciling() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = contacts(&server).await;
+    let chat_id = first_message(&mut a, &abin, rahul.number).await;
+    act(&mut b, ClientFrame::Block { number: abin.number }).await;
+    b.next_person(abin.number).await;
+    for _ in 0..2 {
+        a.send_body(&chat_id, b"blocked".to_vec(), None).await;
+    }
+    act(&mut b, ClientFrame::Unblock { number: abin.number }).await;
+    b.next_person(abin.number).await;
+    a.send_body(&chat_id, b"again".to_vec(), None).await;
+    a.drain().await;
+    act(&mut b, accept(abin.number)).await;
+    assert_eq!(next_marks(&mut a).await.withheld, vec![[2, 3]]);
+}
