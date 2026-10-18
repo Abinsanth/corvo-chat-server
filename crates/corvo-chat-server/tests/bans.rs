@@ -198,3 +198,23 @@ async fn eleventh_report_in_a_day_is_refused() {
     }
     assert_error(report(&mut b, abin.number, None, false).await, ErrorCode::RateLimited);
 }
+
+#[tokio::test]
+async fn refused_report_charges_no_lookup() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, _b) = common::chat::strangers(&server).await;
+    for _ in 0..10 {
+        assert_eq!(report(&mut a, rahul.number, None, false).await, ServerFrame::Reported);
+    }
+    assert_error(report(&mut a, rahul.number, None, false).await, ErrorCode::RateLimited);
+    let key = abin.id(&server).await.to_string();
+    let lookups: i64 = server
+        .state
+        .db
+        .call(move |c| {
+            c.query_row("SELECT COUNT(*) FROM attempts WHERE kind = 'lookup' AND key = ?1", [key], |r| r.get(0))
+                .unwrap()
+        })
+        .await;
+    assert_eq!(lookups, 10);
+}

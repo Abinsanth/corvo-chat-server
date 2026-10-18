@@ -148,6 +148,11 @@ impl Link {
             .state
             .db
             .call(move |c| -> rusqlite::Result<Result<(), Refusal>> {
+                // Before the lookup: a refused report doesn't use one up.
+                let key = me.to_string();
+                if attempts::count_since(c, "report", &key, now - DAY + 1)? >= i64::from(limits.reports_per_day) {
+                    return Ok(Err((ErrorCode::RateLimited, "Too many reports today.")));
+                }
                 let other = match accounts::active_by_number(c, number, now)?.filter(|row| row.id != me) {
                     Some(other) => Some(other),
                     None => accounts::known_tombstone(c, me, number, now)?,
@@ -333,6 +338,11 @@ impl Link {
             .state
             .db
             .call(move |c| -> rusqlite::Result<Result<(), Refusal>> {
+                // Before the lookup: a refused report doesn't use one up.
+                let key = me.to_string();
+                if attempts::count_since(c, "report", &key, now - DAY + 1)? >= i64::from(limits.reports_per_day) {
+                    return Ok(Err((ErrorCode::RateLimited, "Too many reports today.")));
+                }
                 let other = match accounts::active_by_number(c, number, now)?.filter(|row| row.id != me) {
                     Some(other) => Some(other),
                     None => accounts::known_tombstone(c, me, number, now)?,
@@ -347,10 +357,6 @@ impl Link {
                 let Some(other) = other else {
                     return Ok(Err((ErrorCode::NumberUnknown, "That number isn't on corvo-chat.")));
                 };
-                let key = me.to_string();
-                if attempts::count_since(c, "report", &key, now - DAY + 1)? >= i64::from(limits.reports_per_day) {
-                    return Ok(Err((ErrorCode::RateLimited, "Too many reports today.")));
-                }
                 let mine = accounts::by_id(c, me, now)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
                 let mut touched = Touched::default();
                 let tx = c.transaction()?;
