@@ -29,5 +29,5 @@ RestrictAddressFamilies=AF_UNIX
 CapabilityBoundingSet=
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
+SystemCallFilter=~@privileged
 UMask=0077
