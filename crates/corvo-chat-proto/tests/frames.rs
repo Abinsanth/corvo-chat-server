@@ -70,7 +70,7 @@ fn chat_info(marks: Option<Marks>) -> ChatInfo {
 }
 
 fn person(display_name: Option<String>, relation: Relation) -> Person {
-    Person { number: number(), display_name, public_keys: keys(), relation }
+    Person { number: number(), display_name, public_keys: keys(), relation, deleted: false }
 }
 
 fn pin(pin: Option<Blob>) -> Pin {
@@ -159,6 +159,9 @@ fn every_frame_round_trips() {
         ClientFrame::RenameDevice { name: "work laptop".into() },
         ClientFrame::SetPin { pin: pin(Some(blob())) },
         ClientFrame::SetPin { pin: pin(None) },
+        ClientFrame::Report { number: number(), reason: Some("spam".into()), block: true },
+        ClientFrame::Report { number: number(), reason: None, block: false },
+        ClientFrame::DeleteAccount,
     ];
     for frame in clients {
         let json = serde_json::to_string(&frame).unwrap();
@@ -204,6 +207,18 @@ fn every_frame_round_trips() {
             message: "x".into(),
         },
         ServerFrame::Presence { number: number(), online: true },
+        ServerFrame::Reported,
+        ServerFrame::SignedOut { reason: SignedOutReason::Banned },
+        ServerFrame::SignedOut { reason: SignedOutReason::AccountDeleted },
+        ServerFrame::Error { code: ErrorCode::Banned, message: "x".into(), until: None },
+        ServerFrame::Error { code: ErrorCode::AccountDeleted, message: "x".into(), until: None },
+        ServerFrame::Events {
+            events: vec![Event {
+                seq: 1,
+                event: EventBody::Person { person: Person { deleted: true, ..person(None, Relation::Contact) } },
+            }],
+            cursor: 1,
+        },
     ];
     for frame in servers {
         let json = serde_json::to_string(&frame).unwrap();
@@ -213,7 +228,7 @@ fn every_frame_round_trips() {
 
 /// One event of every kind.
 fn all_events() -> Vec<Event> {
-    let marks = Marks { received_through: 2, read_through: 1 };
+    let marks = Marks { received_through: 2, read_through: 1, withheld: vec![[3, 5], [9, 9]] };
     let bodies = vec![
         EventBody::Message { message: message() },
         EventBody::Chat { chat: chat_info(Some(marks.clone())) },
@@ -235,6 +250,20 @@ fn event_has_the_documented_wire_format() {
         serde_json::to_string(&event).unwrap(),
         r#"{"seq":7,"event":{"kind":"read","chat_id":"AAAAAAAAAAAAAAAAAAAAAA==","read_through":3}}"#
     );
+}
+
+#[test]
+fn marks_without_withheld_still_parse() {
+    let marks: Marks = serde_json::from_str(r#"{"received_through":2,"read_through":1}"#).unwrap();
+    assert_eq!(marks, Marks { received_through: 2, read_through: 1, withheld: vec![] });
+}
+
+#[test]
+fn person_without_deleted_still_parses() {
+    let mut json = serde_json::to_value(person(None, Relation::Asked)).unwrap();
+    json.as_object_mut().unwrap().remove("deleted");
+    let back: Person = serde_json::from_value(json).unwrap();
+    assert!(!back.deleted);
 }
 
 #[test]

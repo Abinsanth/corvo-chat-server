@@ -28,15 +28,18 @@ impl Link {
         let copy = self
             .state
             .db
-            .call(move |c| -> rusqlite::Result<Option<Vec<u8>>> {
-                if accounts::by_id(c, account_id, now)?.is_none() {
-                    return Ok(None);
+            .call(move |c| -> rusqlite::Result<Option<Result<Vec<u8>, ()>>> {
+                match accounts::by_id(c, account_id, now)? {
+                    None => Ok(None),
+                    // The recovery code is proven, so the ban may show.
+                    Some(row) if row.banned => Ok(Some(Err(()))),
+                    Some(_) => accounts::copy(c, account_id, Which::Recovery).map(|copy| Some(Ok(copy))),
                 }
-                accounts::copy(c, account_id, Which::Recovery).map(Some)
             })
             .await;
         match copy {
-            Ok(Some(copy)) => {
+            Ok(Some(Err(()))) => self.error(ErrorCode::Banned, super::sign_in::BANNED).await,
+            Ok(Some(Ok(copy))) => {
                 self.conn = Conn::Recovering(Box::new(Recovering { account_id, device }));
                 self.send(&ServerFrame::RecoveryOffer { recovery_copy: Blob(copy) }).await
             }

@@ -73,7 +73,7 @@ async fn request_marks_appear_only_on_accept() {
     assert!(a.quiet().await, "a request shows no marks");
     act(&mut b, accept(abin.number)).await;
     let marks = wait_for(&mut a, |e| matches!(e, EventBody::Marks { .. })).await;
-    assert!(matches!(marks, EventBody::Marks { marks: Marks { received_through: 1, read_through: 1 }, .. }));
+    assert!(matches!(marks, EventBody::Marks { marks: Marks { received_through: 1, read_through: 1, .. }, .. }));
 }
 
 #[tokio::test]

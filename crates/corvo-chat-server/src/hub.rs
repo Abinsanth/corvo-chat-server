@@ -102,6 +102,11 @@ impl Hub {
         }
     }
 
+    /// Each (session, account) held by a connection right now.
+    pub fn entries(&self) -> Vec<(i64, i64)> {
+        self.map().iter().map(|(session, o)| (*session, o.account)).collect()
+    }
+
     /// The sessions held by a connection right now.
     pub fn sessions(&self) -> HashSet<i64> {
         self.map().keys().copied().collect()

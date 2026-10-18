@@ -336,9 +336,9 @@ async fn marks_move_from_sent_to_received_to_read() {
     let (abin, mut a, rahul, mut b) = contacts(&server).await;
     let chat_id = first_message(&mut a, &abin, rahul.number).await;
     b.send(&ClientFrame::Received { chat_id: chat_id.clone(), through: 1 }).await;
-    assert_eq!(next_marks(&mut a).await, Marks { received_through: 1, read_through: 0 });
+    assert_eq!(next_marks(&mut a).await, Marks { received_through: 1, read_through: 0, withheld: vec![] });
     b.send(&ClientFrame::Read { chat_id, through: 1 }).await;
-    assert_eq!(next_marks(&mut a).await, Marks { received_through: 1, read_through: 1 });
+    assert_eq!(next_marks(&mut a).await, Marks { received_through: 1, read_through: 1, withheld: vec![] });
 }
 
 #[tokio::test]
@@ -348,7 +348,7 @@ async fn first_ack_from_any_device_counts() {
     let (mut b2, _) = rahul.sign_in(&server, &device("phone")).await;
     let chat_id = first_message(&mut a, &abin, rahul.number).await;
     b2.send(&ClientFrame::Received { chat_id: chat_id.clone(), through: 1 }).await;
-    assert_eq!(next_marks(&mut a).await, Marks { received_through: 1, read_through: 0 });
+    assert_eq!(next_marks(&mut a).await, Marks { received_through: 1, read_through: 0, withheld: vec![] });
     b.send(&ClientFrame::Received { chat_id, through: 1 }).await;
     assert!(a.quiet().await, "a second device's ack changes nothing");
 }
@@ -375,7 +375,7 @@ async fn acks_never_move_backwards() {
     let chat_id = first_message(&mut a, &abin, rahul.number).await;
     assert_sent(&a.send_body(&chat_id, b"x".to_vec(), None).await);
     b.send(&ClientFrame::Read { chat_id: chat_id.clone(), through: 2 }).await;
-    assert_eq!(next_marks(&mut a).await, Marks { received_through: 2, read_through: 2 });
+    assert_eq!(next_marks(&mut a).await, Marks { received_through: 2, read_through: 2, withheld: vec![] });
     b.send(&ClientFrame::Read { chat_id: chat_id.clone(), through: 1 }).await;
     b.send(&ClientFrame::Received { chat_id, through: 1 }).await;
     assert!(a.quiet().await);

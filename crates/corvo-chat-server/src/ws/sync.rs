@@ -58,8 +58,11 @@ fn marks(c: &Connection, chat: &ChatRow, viewer: i64) -> rusqlite::Result<Option
     if !relations::shows_marks(c, other, viewer)? {
         return Ok(None);
     }
-    Ok(chats::member(c, &chat.id, other)?
-        .map(|m| Marks { received_through: m.received_through, read_through: m.read_through }))
+    Ok(chats::member(c, &chat.id, other)?.map(|m| Marks {
+        received_through: m.received_through,
+        read_through: m.read_through,
+        withheld: Vec::new(),
+    }))
 }
 
 /// A chat as `viewer` sees it, or `None` if a member is gone.
@@ -97,6 +100,7 @@ pub(super) fn person(c: &Connection, viewer: i64, other: i64, now: i64) -> rusql
         display_name,
         public_keys: accounts::public_keys(c, other)?,
         relation: relations::get(c, viewer, other)?,
+        deleted: row.deleted,
     }))
 }
 

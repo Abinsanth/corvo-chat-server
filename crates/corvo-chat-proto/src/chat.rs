@@ -41,6 +41,10 @@ pub struct NewChat {
 pub struct Marks {
     pub received_through: i64,
     pub read_through: i64,
+    /// Inclusive seq ranges of the viewer's own messages that never reached
+    /// the other side (blocked, or over the request limits): they stay `·`.
+    #[serde(default)]
+    pub withheld: Vec<[i64; 2]>,
 }
 
 /// A chat as one member sees it. `keys` holds both sealed copies, the
@@ -81,6 +85,9 @@ pub struct Person {
     pub display_name: Option<String>,
     pub public_keys: PublicKeys,
     pub relation: Relation,
+    /// They deleted their account: the chat stays, marked so.
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 /// The viewer's pinned keys for a number, encrypted by the client. `None`
