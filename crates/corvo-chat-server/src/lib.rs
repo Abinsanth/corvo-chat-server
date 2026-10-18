@@ -4,6 +4,7 @@
 pub mod accounts;
 pub mod admin;
 pub mod attempts;
+pub mod backup;
 pub mod chats;
 pub mod cleanup;
 pub mod clock;

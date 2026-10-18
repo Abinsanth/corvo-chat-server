@@ -2,7 +2,7 @@ use std::{net::Ipv4Addr, path::PathBuf, sync::Arc};
 
 use clap::{Args, Parser, Subcommand};
 use corvo_chat_server::{
-    AppState, Tls, admin, app, cleanup,
+    AppState, Tls, admin, app, backup, cleanup,
     clock::Clock,
     db::{self, Db},
     hub::Hub,
@@ -82,6 +82,14 @@ enum Command {
         #[command(flatten)]
         dir: DataDir,
     },
+    /// Copy the database to backups/, keeping the newest few.
+    Backup {
+        /// How many backups to keep.
+        #[arg(long, default_value_t = backup::KEEP)]
+        keep: usize,
+        #[command(flatten)]
+        dir: DataDir,
+    },
     /// Lift a ban.
     Unban {
         /// The account's number.
@@ -146,6 +154,11 @@ async fn main() -> anyhow::Result<()> {
             if !errors.is_empty() {
                 std::process::exit(1);
             }
+            Ok(())
+        }
+        Command::Backup { keep, dir } => {
+            let path = backup::run(&dir.data_dir, Clock::system().now(), keep)?;
+            println!("backed up to {}", path.display());
             Ok(())
         }
         Command::Unban { number, dir } => {
