@@ -14,13 +14,12 @@ use corvo_chat_proto::{
 use opaque_ke::{CredentialFinalization, CredentialRequest, ServerLogin, ServerLoginParameters, ServerRegistration};
 use rand_core::OsRng;
 use rusqlite::Connection;
-use tokio::sync::oneshot;
 
 use super::{Conn, Flow, Link};
 use crate::{
     accounts::{self, AccountRow, LockState, Which},
     attempts,
-    hub::{Hub, Kick},
+    hub::{Hub, Joined, Kick},
     limits::Limits,
     sessions::{self, NewSession, SessionError},
 };
@@ -71,7 +70,7 @@ pub(super) struct Done {
     pub token: [u8; 32],
     pub account: Account,
     pub copy: Option<Blob>,
-    pub kick: oneshot::Receiver<Kick>,
+    pub joined: Joined,
 }
 
 /// How a proven password sign-in ended.
@@ -143,11 +142,13 @@ fn look_up(
 
 /// Hands `session` to connection `conn` in the hub, and closes the
 /// connection of the session it replaced.
-pub(super) fn join(hub: &Hub, conn: u64, session: &NewSession) -> oneshot::Receiver<Kick> {
+pub(super) fn join(hub: &Hub, account: i64, conn: u64, session: &NewSession) -> Joined {
+    // Joining first keeps the account online throughout a same-device sign-in.
+    let joined = hub.join(session.id, account, conn);
     if let Some(old) = session.replaced {
         hub.kick(old, Kick::Replaced);
     }
-    hub.join(session.id, conn)
+    joined
 }
 
 /// Whether the client's finalization completes `login`.
@@ -254,14 +255,14 @@ impl Link {
                 };
                 attempts::note(c, "sign_in", &key, now)?;
                 let copy = accounts::copy(c, account_id, Which::Password)?;
-                let kick = join(&hub, conn_id, &session);
+                let joined = join(&hub, account_id, conn_id, &session);
                 Ok(SignIn::Done(Box::new(Done {
                     session: session.id,
                     account_id,
                     token: session.token,
                     account: row.to_frame(),
                     copy: Some(Blob(copy)),
-                    kick,
+                    joined,
                 })))
             })
             .await;
@@ -296,14 +297,14 @@ impl Link {
                 let Some(session) = session else { return Ok(Resumed::Unknown) };
                 let Some(row) = accounts::by_id(c, session.account_id, now)? else { return Ok(Resumed::Expired) };
                 sessions::touch(c, session.id, now)?;
-                let kick = hub.join(session.id, conn_id);
+                let joined = hub.join(session.id, row.id, conn_id);
                 Ok(Resumed::Done(Box::new(Done {
                     session: session.id,
                     account_id: row.id,
                     token: token.0,
                     account: row.to_frame(),
                     copy: None,
-                    kick,
+                    joined,
                 })))
             })
             .await;
@@ -317,8 +318,9 @@ impl Link {
 
     /// The connection now holds `done`'s session: say so.
     pub(super) async fn enter(&mut self, done: Done) -> Flow {
-        let Done { session, account_id, token, account, copy, kick } = done;
-        self.kick = Some(kick);
+        let Done { session, account_id, token, account, copy, joined } = done;
+        self.kick = Some(joined.kick);
+        self.push = Some(joined.push);
         self.conn = Conn::SignedIn { session, account_id, reauthed_until: None, reauth: None };
         self.send(&ServerFrame::SignedIn { token: B64(token), account, copy }).await
     }

@@ -2,6 +2,7 @@
 //! certificate, and a client that trusts only that certificate.
 #![allow(dead_code)] // each test binary uses only some of these
 
+pub mod chat;
 pub mod client;
 pub mod person;
 

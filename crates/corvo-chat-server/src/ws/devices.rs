@@ -10,7 +10,7 @@ use super::{Conn, Flow, Link};
 use crate::{hub::Kick, sessions};
 
 /// The account's devices, oldest first, with `this` marked.
-fn infos(c: &Connection, account_id: i64, this: i64) -> rusqlite::Result<Vec<DeviceInfo>> {
+pub(super) fn infos(c: &Connection, account_id: i64, this: i64) -> rusqlite::Result<Vec<DeviceInfo>> {
     let list = sessions::list(c, account_id)?;
     Ok(list
         .into_iter()

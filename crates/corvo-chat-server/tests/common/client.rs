@@ -3,8 +3,11 @@
 
 use std::{net::SocketAddr, time::Duration};
 
+use std::collections::VecDeque;
+
 use corvo_chat_proto::{
-    B64, PROTOCOL_VERSION,
+    B64, Number, PROTOCOL_VERSION,
+    chat::Event,
     frames::{ClientFrame, ErrorCode, ServerFrame},
     opaque::{CredFinal, CredRequest, CredResponse, RegRequest, RegResponse, RegUpload, Suite, recovery_ksf, wrap_key},
 };
@@ -47,7 +50,13 @@ pub async fn start_server_with(limits: Limits) -> TestServer {
 }
 
 /// One WebSocket connection to `/ws`.
-pub struct Client(WebSocketStream<TlsStream<TcpStream>>);
+pub struct Client {
+    ws: WebSocketStream<TlsStream<TcpStream>>,
+    /// Pushed events, kept until a test asks for them.
+    pub(super) events: VecDeque<Event>,
+    /// Pushed presence changes, kept until a test asks for them.
+    pub(super) presence: VecDeque<(Number, bool)>,
+}
 
 impl Client {
     pub async fn connect(server: &TestServer) -> Client {
@@ -66,7 +75,7 @@ impl Client {
         let tls = connect_over(tcp, server.der.clone()).await;
         let (ws, _) =
             tokio_tungstenite::client_async("wss://localhost/ws", tls).await.expect("the WebSocket handshake succeeds");
-        Client(ws)
+        Client { ws, events: VecDeque::new(), presence: VecDeque::new() }
     }
 
     pub async fn send(&mut self, frame: &ClientFrame) {
@@ -75,24 +84,45 @@ impl Client {
     }
 
     pub async fn send_raw(&mut self, message: Message) {
-        self.0.send(message).await.expect("the frame is sent");
+        self.ws.send(message).await.expect("the frame is sent");
     }
 
     /// Sends `message`; an error means the server closed the connection.
     pub async fn try_send_raw(&mut self, message: Message) -> Result<(), tokio_tungstenite::tungstenite::Error> {
-        self.0.send(message).await
+        self.ws.send(message).await
     }
 
-    /// The next frame. Panics after 5 s, or if the server closes.
-    pub async fn recv(&mut self) -> ServerFrame {
+    /// The next frame of any kind. Panics after 5 s, or if the server closes.
+    pub async fn recv_raw(&mut self) -> ServerFrame {
         loop {
-            let message = timeout(WAIT, self.0.next()).await.expect("a frame within 5 s");
+            let message = timeout(WAIT, self.ws.next()).await.expect("a frame within 5 s");
             match message {
                 Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).expect("a server frame"),
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                 other => panic!("expected a frame, got {other:?}"),
             }
         }
+    }
+
+    /// The next frame that isn't pushed: `events` and `presence` frames are
+    /// kept for `next_event` and `next_presence`.
+    pub async fn recv(&mut self) -> ServerFrame {
+        loop {
+            let frame = self.recv_raw().await;
+            if !self.keep(&frame) {
+                return frame;
+            }
+        }
+    }
+
+    /// Keeps a pushed frame; `false` for any other.
+    pub(super) fn keep(&mut self, frame: &ServerFrame) -> bool {
+        match frame {
+            ServerFrame::Events { events, .. } => self.events.extend(events.iter().cloned()),
+            ServerFrame::Presence { number, online } => self.presence.push_back((*number, *online)),
+            _ => return false,
+        }
+        true
     }
 
     /// Whether the server closes the connection within 5 s.
@@ -105,7 +135,7 @@ impl Client {
     pub async fn closed_within(&mut self, wait: Duration) -> bool {
         let closed = async {
             loop {
-                match self.0.next().await {
+                match self.ws.next().await {
                     None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
                     Some(Ok(_)) => {}
                 }
@@ -119,7 +149,7 @@ impl Client {
     pub async fn closed_quietly(&mut self) -> bool {
         let next = async {
             loop {
-                match self.0.next().await {
+                match self.ws.next().await {
                     None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return true,
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
                     Some(Ok(_)) => return false,

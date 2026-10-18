@@ -41,7 +41,7 @@ enum Start {
 
 /// The result of creating the account and its session.
 enum Created {
-    Done { token: [u8; 32], account_id: i64, session: i64, kick: tokio::sync::oneshot::Receiver<crate::hub::Kick> },
+    Done { token: [u8; 32], account_id: i64, session: i64, joined: crate::hub::Joined },
     Taken,
     Limit(&'static str),
 }
@@ -200,12 +200,12 @@ impl Link {
                         return Err(err);
                     }
                 };
-                let kick = hub.join(session.id, conn_id);
-                Ok(Created::Done { token: session.token, account_id, session: session.id, kick })
+                let joined = hub.join(session.id, account_id, conn_id);
+                Ok(Created::Done { token: session.token, account_id, session: session.id, joined })
             })
             .await;
         match created {
-            Ok(Created::Done { token, account_id, session, kick }) => {
+            Ok(Created::Done { token, account_id, session, joined }) => {
                 let account = Account {
                     username,
                     number,
@@ -213,7 +213,7 @@ impl Link {
                     pending_until: Some(now + self.state.limits.pending_secs),
                 };
                 tracing::info!("signed up {} ({})", account.username, account.number);
-                self.enter(Done { session, account_id, token, account, copy: None, kick }).await
+                self.enter(Done { session, account_id, token, account, copy: None, joined }).await
             }
             Ok(Created::Limit(message)) => {
                 self.conn = Conn::Anonymous;
