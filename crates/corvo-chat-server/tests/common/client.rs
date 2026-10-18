@@ -5,7 +5,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use corvo_chat_proto::{
     B64, PROTOCOL_VERSION,
-    frames::{ClientFrame, ServerFrame},
+    frames::{ClientFrame, ErrorCode, ServerFrame},
     opaque::{CredFinal, CredRequest, CredResponse, RegRequest, RegResponse, RegUpload, Suite, recovery_ksf, wrap_key},
 };
 use corvo_chat_server::{AppState, app, limits::Limits};
@@ -52,6 +52,13 @@ pub struct Client(WebSocketStream<TlsStream<TcpStream>>);
 impl Client {
     pub async fn connect(server: &TestServer) -> Client {
         Client::connect_over(server, TcpStream::connect(server.addr).await.expect("the server accepts")).await
+    }
+
+    /// A new connection that has said hello.
+    pub async fn open(server: &TestServer) -> Client {
+        let mut client = Client::connect(server).await;
+        client.hello().await;
+        client
     }
 
     /// Connects over a socket the test set up itself (a small receive buffer, say).
@@ -107,6 +114,21 @@ impl Client {
         timeout(wait, closed).await.is_ok()
     }
 
+    /// Whether the server closes the connection within 5 s with no frame
+    /// before the close.
+    pub async fn closed_quietly(&mut self) -> bool {
+        let next = async {
+            loop {
+                match self.0.next().await {
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return true,
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    Some(Ok(_)) => return false,
+                }
+            }
+        };
+        timeout(WAIT, next).await.unwrap_or(false)
+    }
+
     /// Sends `hello` and expects `ready`.
     pub async fn hello(&mut self) {
         self.send(&ClientFrame::Hello { protocol_version: PROTOCOL_VERSION, app_version: "test".into() }).await;
@@ -114,6 +136,14 @@ impl Client {
             ServerFrame::Ready { .. } => {}
             other => panic!("expected ready, got {other:?}"),
         }
+    }
+}
+
+/// Panics unless `frame` is an error with `code`.
+pub fn assert_error(frame: ServerFrame, code: ErrorCode) {
+    match frame {
+        ServerFrame::Error { code: got, .. } => assert_eq!(got, code),
+        other => panic!("expected {code:?}, got {other:?}"),
     }
 }
 

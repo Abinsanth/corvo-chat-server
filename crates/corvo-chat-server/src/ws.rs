@@ -16,7 +16,9 @@ use axum::{
 use corvo_chat_proto::{
     PROTOCOL_VERSION,
     frames::{ClientFrame, Device, ErrorCode, ServerFrame, SignedOutReason},
+    opaque::Suite,
 };
+use opaque_ke::ServerLogin;
 use tokio::{
     sync::oneshot,
     time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout, timeout_at},
@@ -24,7 +26,10 @@ use tokio::{
 
 use crate::{AppState, PeerAddr, accounts, hub::Kick};
 
+mod sign_in;
 mod signup;
+
+use sign_in::LoginKind;
 
 /// The WebSocket route.
 pub const PATH: &str = "/ws";
@@ -55,16 +60,14 @@ pub async fn upgrade(
 }
 
 /// Where a connection is.
-#[expect(dead_code, reason = "login, recovery and resume still build `LoginOffered` and `Recovering`")]
 enum Conn {
     Anonymous,
     /// After `signup_offer`, waiting for `signup_finish`.
     SignupOffered(Box<signup::Offered>),
-    /// After `login_offer`, waiting for the matching finish.
-    LoginOffered {
-        kind: LoginKind,
-    },
+    /// After a sign-in or recovery `login_offer`, waiting for the matching finish.
+    LoginOffered(Box<sign_in::Offered>),
     /// After `recovery_finish`, waiting for `reregister` and `recovery_complete`.
+    #[expect(dead_code, reason = "recovery builds it")]
     Recovering {
         account_id: i64,
         device: Device,
@@ -72,16 +75,11 @@ enum Conn {
     SignedIn {
         session: i64,
         account_id: i64,
+        /// Until when the password was proven again, for secret changes.
         reauthed_until: Option<i64>,
+        /// After a reauth `login_offer`: the device stays signed in meanwhile.
+        reauth: Option<Box<ServerLogin<Suite>>>,
     },
-}
-
-/// What a `login_offer` was for.
-#[expect(dead_code, reason = "made by the login, recovery and reauth handlers")]
-enum LoginKind {
-    Login,
-    Recovery,
-    Reauth,
 }
 
 impl Conn {
@@ -238,11 +236,23 @@ impl Link {
             F::SignupFinish { password, recovery, password_copy, recovery_copy, public_keys } => {
                 self.signup_finish(password, recovery, password_copy, recovery_copy, public_keys).await
             }
+            F::LoginStart { username, request, device } => {
+                self.login_start(LoginKind::Login, username, request, device).await
+            }
+            F::RecoveryStart { username, request, device } => {
+                self.login_start(LoginKind::Recovery, username, request, device).await
+            }
+            F::LoginFinish { finalization } | F::RecoveryFinish { finalization } => {
+                self.login_finish(finalization).await
+            }
+            F::Resume { token, device_id } => self.resume(token, device_id).await,
+            F::ReauthStart { request } => self.reauth_start(request).await,
+            F::ReauthFinish { finalization } => self.reauth_finish(finalization).await,
             F::Activate { code } => self.activate(code).await,
             F::Invite { number } => self.invite(number).await,
             F::ListInvites => self.list_invites().await,
             F::SignOut => self.sign_out().await,
-            // The rest arrive with login, devices and recovery.
+            // The rest arrive with devices and recovery.
             _ => self.error(ErrorCode::BadFrame, "not supported yet").await,
         }
     }
@@ -275,24 +285,21 @@ async fn gate(conn: &Conn, state: &AppState, frame: &ClientFrame) -> Verdict {
             F::SignupFinish { .. } => Verdict::Pass,
             _ => anonymous(frame),
         },
-        Conn::LoginOffered { kind } => match (kind, frame) {
-            (LoginKind::Login, F::LoginFinish { .. })
-            | (LoginKind::Recovery, F::RecoveryFinish { .. })
-            | (LoginKind::Reauth, F::ReauthFinish { .. }) => Verdict::Pass,
-            (LoginKind::Reauth, _) => Verdict::Refuse(ErrorCode::BadFrame),
+        Conn::LoginOffered(offered) => match (offered.kind, frame) {
+            (LoginKind::Login, F::LoginFinish { .. }) | (LoginKind::Recovery, F::RecoveryFinish { .. }) => {
+                Verdict::Pass
+            }
             _ => anonymous(frame),
         },
         Conn::Recovering { .. } => match frame {
             F::Reregister { .. } | F::RecoveryComplete { .. } => Verdict::Pass,
             _ => anonymous(frame),
         },
-        Conn::SignedIn { account_id, reauthed_until, .. } => {
+        Conn::SignedIn { account_id, reauthed_until, reauth, .. } => {
             match frame {
-                F::Hello { .. }
-                | F::SignupFinish { .. }
-                | F::LoginFinish { .. }
-                | F::RecoveryFinish { .. }
-                | F::ReauthFinish { .. } => return Verdict::Refuse(ErrorCode::BadFrame),
+                F::Hello { .. } | F::SignupFinish { .. } | F::LoginFinish { .. } | F::RecoveryFinish { .. } => {
+                    return Verdict::Refuse(ErrorCode::BadFrame);
+                }
                 F::SignupStart { .. } | F::LoginStart { .. } | F::RecoveryStart { .. } | F::Resume { .. } => {
                     return Verdict::Refuse(ErrorCode::AlreadySignedIn);
                 }
@@ -314,6 +321,7 @@ async fn gate(conn: &Conn, state: &AppState, frame: &ClientFrame) -> Verdict {
                 F::Reregister { .. } | F::ChangePassword { .. } | F::NewRecoveryCode { .. } if !reauthed => {
                     Verdict::Refuse(ErrorCode::NotAllowed)
                 }
+                F::ReauthFinish { .. } if reauth.is_none() => Verdict::Refuse(ErrorCode::BadFrame),
                 F::RecoveryComplete { .. } => Verdict::Refuse(ErrorCode::NotAllowed),
                 _ => Verdict::Pass,
             }

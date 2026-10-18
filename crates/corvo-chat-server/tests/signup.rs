@@ -1,7 +1,7 @@
 mod common;
 
 use common::{
-    client::{Client, TestServer, start_server, start_server_with},
+    client::{Client, TestServer, assert_error, start_server, start_server_with},
     person::{Person, begin_signup, device},
 };
 use corvo_chat_proto::{
@@ -10,13 +10,6 @@ use corvo_chat_proto::{
     names::is_username,
 };
 use corvo_chat_server::{accounts, limits::Limits};
-
-fn assert_error(frame: ServerFrame, code: ErrorCode) {
-    match frame {
-        ServerFrame::Error { code: got, .. } => assert_eq!(got, code),
-        other => panic!("expected {code:?}, got {other:?}"),
-    }
-}
 
 /// Invites `number` from `client` and returns the invite.
 async fn invite(client: &mut Client, number: Number) -> InviteInfo {
