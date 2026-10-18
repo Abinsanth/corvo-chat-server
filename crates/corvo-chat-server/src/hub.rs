@@ -1,7 +1,7 @@
 //! The live sessions: which connection holds each signed-in session, so the
 //! server can sign a device out while it's connected.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use corvo_chat_proto::frames::SignedOutReason;
@@ -50,6 +50,11 @@ impl Hub {
         if online.get(&session).is_some_and(|o| o.conn == conn) {
             online.remove(&session);
         }
+    }
+
+    /// The sessions held by a connection right now.
+    pub fn sessions(&self) -> HashSet<i64> {
+        self.online().keys().copied().collect()
     }
 
     fn online(&self) -> MutexGuard<'_, HashMap<i64, Online>> {

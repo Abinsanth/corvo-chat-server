@@ -228,7 +228,7 @@ impl Link {
         };
         match kind {
             LoginKind::Login => self.password_sign_in(account_id, device).await,
-            LoginKind::Recovery => self.error(ErrorCode::BadFrame, "not supported yet").await,
+            LoginKind::Recovery => self.recovery_offer(account_id, device).await,
         }
     }
 

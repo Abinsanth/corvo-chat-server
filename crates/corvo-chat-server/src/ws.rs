@@ -15,7 +15,7 @@ use axum::{
 };
 use corvo_chat_proto::{
     PROTOCOL_VERSION,
-    frames::{ClientFrame, Device, ErrorCode, ServerFrame, SignedOutReason},
+    frames::{ClientFrame, ErrorCode, ServerFrame, SignedOutReason},
     opaque::Suite,
 };
 use opaque_ke::ServerLogin;
@@ -26,6 +26,8 @@ use tokio::{
 
 use crate::{AppState, PeerAddr, accounts, hub::Kick};
 
+mod devices;
+mod secrets;
 mod sign_in;
 mod signup;
 
@@ -67,11 +69,7 @@ enum Conn {
     /// After a sign-in or recovery `login_offer`, waiting for the matching finish.
     LoginOffered(Box<sign_in::Offered>),
     /// After `recovery_finish`, waiting for `reregister` and `recovery_complete`.
-    #[expect(dead_code, reason = "recovery builds it")]
-    Recovering {
-        account_id: i64,
-        device: Device,
-    },
+    Recovering(Box<secrets::Recovering>),
     SignedIn {
         session: i64,
         account_id: i64,
@@ -251,9 +249,17 @@ impl Link {
             F::Activate { code } => self.activate(code).await,
             F::Invite { number } => self.invite(number).await,
             F::ListInvites => self.list_invites().await,
+            F::Reregister { password, recovery } => self.reregister(password, recovery).await,
+            F::RecoveryComplete { password, recovery, password_copy, recovery_copy } => {
+                self.recovery_complete(password, recovery, password_copy, recovery_copy).await
+            }
+            F::ChangePassword { password, password_copy } => self.change_password(password, password_copy).await,
+            F::NewRecoveryCode { recovery, recovery_copy } => self.new_recovery_code(recovery, recovery_copy).await,
+            F::ListDevices => self.list_devices().await,
+            F::SignOutDevice { id } => self.sign_out_device(id).await,
             F::SignOut => self.sign_out().await,
-            // The rest arrive with devices and recovery.
-            _ => self.error(ErrorCode::BadFrame, "not supported yet").await,
+            // The gate refuses a second hello.
+            F::Hello { .. } => self.error(ErrorCode::BadFrame, "not expected now").await,
         }
     }
 
@@ -291,7 +297,7 @@ async fn gate(conn: &Conn, state: &AppState, frame: &ClientFrame) -> Verdict {
             }
             _ => anonymous(frame),
         },
-        Conn::Recovering { .. } => match frame {
+        Conn::Recovering(_) => match frame {
             F::Reregister { .. } | F::RecoveryComplete { .. } => Verdict::Pass,
             _ => anonymous(frame),
         },
