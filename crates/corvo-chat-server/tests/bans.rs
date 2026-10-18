@@ -218,3 +218,15 @@ async fn refused_report_charges_no_lookup() {
         .await;
     assert_eq!(lookups, 10);
 }
+
+#[tokio::test]
+async fn blocking_still_works_after_the_days_reports() {
+    use corvo_chat_proto::chat::Relation;
+    let server = start_server().await;
+    let (abin, _a, _rahul, mut b) = contacts(&server).await;
+    for _ in 0..10 {
+        assert_eq!(report(&mut b, abin.number, None, false).await, ServerFrame::Reported);
+    }
+    b.send(&ClientFrame::Block { number: abin.number }).await;
+    assert_eq!(b.next_person(abin.number).await.relation, Relation::Blocked);
+}
