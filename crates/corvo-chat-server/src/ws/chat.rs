@@ -9,7 +9,11 @@ use corvo_chat_proto::{
 };
 use rusqlite::Connection;
 
-use super::{Conn, Flow, Link, people::announce_pair, sign_in::HOUR};
+use super::{
+    Conn, Flow, Link,
+    people::announce_pair,
+    sign_in::{BANNED, HOUR},
+};
 use crate::{
     accounts, attempts,
     chats::{self, Added, ChatError},
@@ -33,6 +37,7 @@ fn refused<T>(code: ErrorCode, message: impl Into<String>) -> rusqlite::Result<R
 enum Looked {
     Found(Number, PublicKeys),
     Unknown,
+    Banned,
     Limit,
 }
 
@@ -110,6 +115,9 @@ fn open_chat(
     let Some(new) = &out.new_chat else { return refused(ErrorCode::ChatUnknown, "No such chat.") };
     let other = accounts::active_by_number(c, new.number, now)?.filter(|row| row.id != me);
     let Some(other) = other else { return refused(ErrorCode::NumberUnknown, "That number isn't on corvo-chat.") };
+    if other.banned {
+        return refused(ErrorCode::Banned, BANNED);
+    }
     let mine = accounts::by_id(c, me, now)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     let proof = chat_proof(&out.chat_id, mine.number, &new.my_key.0, other.number, &new.their_key.0);
     if !accounts::public_keys(c, me)?.verifies(&proof, &new.signature) {
@@ -148,6 +156,9 @@ fn store(
         Err(refusal) => return Ok(Err(refusal)),
     };
     let other = chat.other(me);
+    if accounts::by_id(c, other, now)?.is_some_and(|row| row.banned) {
+        return refused(ErrorCode::Banned, BANNED);
+    }
     // A resend after a reconnect: the first one stands, and counts once.
     if let Some(known) = chats::by_msg_id(c, &chat.id, &out.msg_id)? {
         return Ok(Ok(known));
@@ -230,6 +241,7 @@ impl Link {
                     return Ok(Looked::Limit);
                 }
                 match accounts::active_by_number(c, number, now)?.filter(|row| row.id != account_id) {
+                    Some(row) if row.banned => Ok(Looked::Banned),
                     Some(row) => Ok(Looked::Found(row.number, accounts::public_keys(c, row.id)?)),
                     None => Ok(Looked::Unknown),
                 }
@@ -239,6 +251,7 @@ impl Link {
             Ok(Looked::Found(number, public_keys)) => self.send(&ServerFrame::Found { number, public_keys }).await,
             Ok(Looked::Unknown) => self.error(ErrorCode::NumberUnknown, "That number isn't on corvo-chat.").await,
             Ok(Looked::Limit) => self.error(ErrorCode::RateLimited, LOOKUP_LIMIT).await,
+            Ok(Looked::Banned) => self.error(ErrorCode::Banned, BANNED).await,
             Err(err) => self.internal("looking up a number", err).await,
         }
     }

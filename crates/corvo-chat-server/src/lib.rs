@@ -18,6 +18,7 @@ pub mod relations;
 pub mod reports;
 pub mod sessions;
 pub mod state;
+pub mod sweep;
 #[cfg(test)]
 mod testing;
 mod tls;

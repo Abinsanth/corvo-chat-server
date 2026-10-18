@@ -26,6 +26,9 @@ use crate::{
 
 /// The window of the per-IP limit on unknown usernames and of the recovery limit.
 pub(super) const HOUR: i64 = 3_600;
+/// The answer to anything a banned account, or anything sent to one.
+pub(super) const BANNED: &str = "This account has been banned.";
+
 /// The window of the daily sign-in limit.
 const DAY: i64 = 86_400;
 
@@ -80,6 +83,7 @@ enum SignIn {
     DeviceLimit,
     /// The account went away in between (an expired pending account).
     Gone,
+    Banned,
 }
 
 /// How a `resume` ended.
@@ -244,6 +248,10 @@ impl Link {
             .call(move |c| -> rusqlite::Result<SignIn> {
                 accounts::note_success(c, account_id)?;
                 let Some(row) = accounts::by_id(c, account_id, now)? else { return Ok(SignIn::Gone) };
+                // Only now, with the password proven, may the ban show.
+                if row.banned {
+                    return Ok(SignIn::Banned);
+                }
                 let key = account_id.to_string();
                 if attempts::count_since(c, "sign_in", &key, now - DAY + 1)? >= i64::from(limits.sign_ins_per_day) {
                     return Ok(SignIn::DailyLimit);
@@ -281,6 +289,7 @@ impl Link {
                 self.error(ErrorCode::DeviceLimit, &message).await
             }
             Ok(SignIn::Gone) => self.wrong().await,
+            Ok(SignIn::Banned) => self.error(ErrorCode::Banned, BANNED).await,
             Err(err) => self.internal("signing in", err).await,
         }
     }

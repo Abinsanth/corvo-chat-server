@@ -8,7 +8,7 @@ use corvo_chat_server::{
     hub::Hub,
     key,
     limits::Limits,
-    serve,
+    serve, sweep,
 };
 use tokio::net::TcpListener;
 
@@ -83,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
             let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
             tracing::info!("corvo-chat-server {} listening on :{port} for {domain}", env!("CARGO_PKG_VERSION"));
             cleanup::spawn_cleanup(state.clone());
+            sweep::spawn(state.clone());
             serve(listener, Tls::Acme { domain, cache_dir: data_dir.join("acme") }, app(state)).await;
             Ok(())
         }
