@@ -94,7 +94,7 @@ pub(super) fn chat_info(c: &Connection, viewer: i64, chat: &ChatRow, now: i64) -
 /// Someone as `viewer` sees them, or `None` if they're gone.
 pub(super) fn person(c: &Connection, viewer: i64, other: i64, now: i64) -> rusqlite::Result<Option<Person>> {
     let Some(row) = accounts::by_id(c, other, now)? else { return Ok(None) };
-    let display_name = relations::shows_name(c, other, viewer)?.then_some(row.display_name);
+    let display_name = (!row.deleted && relations::shows_name(c, other, viewer)?).then_some(row.display_name);
     Ok(Some(Person {
         number: row.number,
         display_name,
