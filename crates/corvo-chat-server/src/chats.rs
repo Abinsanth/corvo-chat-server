@@ -186,6 +186,15 @@ pub fn create(
     Ok(())
 }
 
+/// Every chat `account` is a member of, announced or not.
+pub fn member_of(c: &Connection, account: i64) -> rusqlite::Result<Vec<ChatRow>> {
+    let mut stmt = c.prepare(&format!(
+        "SELECT {} FROM chats JOIN chat_members m ON m.chat_id = chats.id WHERE m.account_id = ?1 ORDER BY chats.id",
+        CHAT_COLUMNS.split(", ").map(|col| format!("chats.{col}")).collect::<Vec<_>>().join(", ")
+    ))?;
+    stmt.query_map([account], chat_row)?.collect()
+}
+
 /// Marks the chat as shown to `account`; `true` the first time.
 pub fn announce(c: &Connection, id: &[u8; 16], account: i64) -> rusqlite::Result<bool> {
     let changed = c.execute(

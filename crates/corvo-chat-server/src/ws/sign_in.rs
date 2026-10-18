@@ -117,7 +117,9 @@ fn look_up(
     if attempts::count_since(c, "unknown_user", ip, since)? >= i64::from(limits.unknown_user_tries_per_ip_hour) {
         return Ok(Looked::Refused(Refusal::RateLimited));
     }
+    // A deleted account's username is retired: it looks like no account at all.
     let row = if is_username(username) { accounts::by_username(c, username, now)? } else { None };
+    let row = row.filter(|row| !row.deleted);
     let Some(row) = row else {
         attempts::note(c, "unknown_user", ip, now)?;
         return Ok(Looked::Unknown);

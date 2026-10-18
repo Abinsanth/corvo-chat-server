@@ -188,6 +188,29 @@ pub fn active_by_number(conn: &Connection, number: Number, now: i64) -> rusqlite
     Ok(by_number(conn, number, now)?.filter(|row| row.pending_until.is_none() && !row.deleted))
 }
 
+/// Deletes an account as a tombstone: the row, number, username and public
+/// keys stay (the number and username are retired, and old messages still
+/// show who sent them); every secret and the display name are wiped; its
+/// sessions, invites, pins, event log and its own relation rows go. Run it
+/// inside the caller's transaction.
+pub fn tombstone(conn: &Connection, id: i64, now: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE accounts SET deleted_at = ?2, display_name = '', password_record = x'', recovery_record = x'',
+           password_copy = x'', recovery_copy = x'' WHERE id = ?1",
+        params![id, now],
+    )?;
+    for sql in [
+        "DELETE FROM sessions WHERE account_id = ?1",
+        "DELETE FROM invites WHERE account_id = ?1 OR inviter_id = ?1",
+        "DELETE FROM pins WHERE account_id = ?1",
+        "DELETE FROM events WHERE account_id = ?1",
+        "DELETE FROM relations WHERE account_id = ?1",
+    ] {
+        conn.execute(sql, [id])?;
+    }
+    Ok(())
+}
+
 pub fn ban(conn: &Connection, id: i64, now: i64) -> rusqlite::Result<()> {
     conn.execute("UPDATE accounts SET banned_at = ?2 WHERE id = ?1", params![id, now])?;
     Ok(())
@@ -301,6 +324,21 @@ mod tests {
             recovery_copy: vec![4; 40],
             public_keys: PublicKeys { signing: B64([5; 32]), exchange: B64([6; 32]), signature: B64([7; 64]) },
         }
+    }
+
+    #[test]
+    fn tombstoned_number_is_never_drawn() {
+        let mut c = conn();
+        let (taken, free) = (number(482_910_557), number(100_000_000));
+        let id = create_pending(&mut c, &new_account("abin-0000", taken), 100, 86_400).unwrap();
+        activate(&c, id, None, 100).unwrap();
+        tombstone(&c, id, 200).unwrap();
+        let mut numbers = [taken, free].into_iter();
+        let mut endings = ["0000", "0001"].into_iter();
+        let picked =
+            pick_name_with(&c, "abin", &mut || endings.next().unwrap().into(), &mut || numbers.next().unwrap());
+        assert_eq!(picked.unwrap(), ("abin-0001".into(), free));
+        assert!(by_id(&c, id, 300).unwrap().unwrap().deleted);
     }
 
     #[test]

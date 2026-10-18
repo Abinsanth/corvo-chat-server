@@ -30,6 +30,7 @@ use crate::{
 };
 
 mod chat;
+mod delete;
 mod devices;
 mod people;
 mod secrets;
@@ -307,8 +308,7 @@ impl Link {
             F::RenameDevice { name } => self.rename_device(name).await,
             F::SetPin { pin } => self.set_pin(pin).await,
             F::Report { number, reason, block } => self.report(number, reason, block).await,
-            // Deleting an account arrives in the next change.
-            F::DeleteAccount => self.error(ErrorCode::BadFrame, "not supported yet").await,
+            F::DeleteAccount => self.delete_account().await,
         }
     }
 
@@ -374,7 +374,9 @@ async fn gate(conn: &Conn, state: &AppState, frame: &ClientFrame) -> Verdict {
             match frame {
                 F::Activate { .. } | F::SignOut => Verdict::Pass,
                 _ if account.pending_until.is_some() => Verdict::Refuse(ErrorCode::NotActive),
-                F::Reregister { .. } | F::ChangePassword { .. } | F::NewRecoveryCode { .. } if !reauthed => {
+                F::Reregister { .. } | F::ChangePassword { .. } | F::NewRecoveryCode { .. } | F::DeleteAccount
+                    if !reauthed =>
+                {
                     Verdict::Refuse(ErrorCode::NotAllowed)
                 }
                 F::ReauthFinish { .. } if reauth.is_none() => Verdict::Refuse(ErrorCode::BadFrame),

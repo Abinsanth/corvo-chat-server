@@ -156,8 +156,10 @@ fn store(
         Err(refusal) => return Ok(Err(refusal)),
     };
     let other = chat.other(me);
-    if accounts::by_id(c, other, now)?.is_some_and(|row| row.banned) {
-        return refused(ErrorCode::Banned, BANNED);
+    match accounts::by_id(c, other, now)? {
+        Some(row) if row.deleted => return refused(ErrorCode::AccountDeleted, "That account was deleted."),
+        Some(row) if row.banned => return refused(ErrorCode::Banned, BANNED),
+        _ => {}
     }
     // A resend after a reconnect: the first one stands, and counts once.
     if let Some(known) = chats::by_msg_id(c, &chat.id, &out.msg_id)? {
