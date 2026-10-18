@@ -11,7 +11,8 @@ pub const DB_FILE: &str = "server.db";
 
 /// Migration 1: M1's tables (accounts). Migration 2: M2's tables (chats and
 /// sync). Migration 3: where each side's current request starts. Migration 4:
-/// bans, deleted accounts and reports.
+/// bans, deleted accounts and reports. Migration 5: an index for withheld
+/// messages.
 const MIGRATIONS: &[&str] = &[
     "
 CREATE TABLE accounts (
@@ -114,6 +115,9 @@ CREATE TABLE reports (
 );
 CREATE INDEX reports_by_reported ON reports (reported_id);
 ",
+    "
+CREATE INDEX messages_withheld ON messages (chat_id, sender_id, seq) WHERE withheld = 1;
+",
 ];
 
 /// Opens (creating if needed) the database with WAL, foreign keys and a busy
@@ -173,7 +177,7 @@ mod tests {
         migrate(&mut conn).unwrap();
         migrate(&mut conn).unwrap();
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, 4_i64);
+        assert_eq!(version, 5_i64);
     }
 
     #[test]
