@@ -108,6 +108,7 @@ pub async fn begin_signup_with(
 
 /// How the client side of an OPAQUE login (sign-in, recovery or reauth) went.
 #[derive(Debug)]
+#[expect(clippy::large_enum_variant, reason = "tests match the frame inside by value; a box would stop that")]
 pub enum Outcome {
     /// The server's last answer: to the finish, or its refusal of the start.
     Server(ServerFrame),
