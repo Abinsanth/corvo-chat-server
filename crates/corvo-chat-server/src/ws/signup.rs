@@ -4,12 +4,12 @@ use corvo_chat_proto::{
     B64, Blob, Number, PublicKeys,
     frames::{Account, Device, ErrorCode, InviteInfo, ServerFrame, SignedOutReason},
     names::{check_base, check_device_name, check_display_name},
-    opaque::{RegRequest, RegUpload, Suite, password_id, recovery_id},
+    opaque::{RegRequest, RegResponse, RegUpload, Suite, password_id, recovery_id},
 };
 use data_encoding::BASE64;
 use opaque_ke::{RegistrationRequest, RegistrationUpload, ServerRegistration};
 
-use super::{Conn, Flow, Link};
+use super::{Conn, Flow, Link, sign_in::Done};
 use crate::{
     accounts::{self, CreateError, NewAccount},
     attempts,
@@ -31,7 +31,7 @@ pub struct Offered {
 }
 
 /// The two OPAQUE messages the server sends in a `signup_offer`.
-type Responses = (B64<64>, B64<64>);
+type Responses = (RegResponse, RegResponse);
 
 /// The result of the signup limit checks and the name draw.
 enum Start {
@@ -44,6 +44,13 @@ enum Created {
     Done { token: [u8; 32], account_id: i64, session: i64, kick: tokio::sync::oneshot::Receiver<crate::hub::Kick> },
     Taken,
     Limit(&'static str),
+}
+
+/// The record a registration upload leaves on the server, or `None` for a
+/// bad upload.
+pub(super) fn password_file(upload: &RegUpload) -> Option<Vec<u8>> {
+    let upload = RegistrationUpload::<Suite>::deserialize(&upload.0).ok()?;
+    Some(ServerRegistration::<Suite>::finish(upload).serialize().to_vec())
 }
 
 /// The signup limits, over a rolling 24 hours: the message of the one the
@@ -114,12 +121,18 @@ impl Link {
 
     /// The server's half of both registrations, or `None` for a bad request.
     fn register(&self, username: &str, password: &RegRequest, recovery: &RegRequest) -> Option<Responses> {
-        let start = |request: &RegRequest, id: Vec<u8>| -> Option<B64<64>> {
-            let request = RegistrationRequest::<Suite>::deserialize(&request.0).ok()?;
-            let started = ServerRegistration::<Suite>::start(&self.state.setup, request, &id).ok()?;
-            Some(B64(started.message.serialize().as_slice().try_into().ok()?))
-        };
-        Some((start(password, password_id(username))?, start(recovery, recovery_id(username))?))
+        Some((
+            self.registration_response(password, &password_id(username))?,
+            self.registration_response(recovery, &recovery_id(username))?,
+        ))
+    }
+
+    /// The server's half of one registration under credential id `id`, or
+    /// `None` for a bad request.
+    pub(super) fn registration_response(&self, request: &RegRequest, id: &[u8]) -> Option<RegResponse> {
+        let request = RegistrationRequest::<Suite>::deserialize(&request.0).ok()?;
+        let started = ServerRegistration::<Suite>::start(&self.state.setup, request, id).ok()?;
+        Some(B64(started.message.serialize().as_slice().try_into().ok()?))
     }
 
     pub(super) async fn signup_finish(
@@ -137,11 +150,8 @@ impl Link {
         if !public_keys.verify() {
             return self.error(ErrorCode::BadPublicKeys, "those keys don't check out").await;
         }
-        let record = |upload: &RegUpload| {
-            let upload = RegistrationUpload::<Suite>::deserialize(&upload.0).ok()?;
-            Some(ServerRegistration::<Suite>::finish(upload).serialize().to_vec())
-        };
-        let (Some(password_record), Some(recovery_record)) = (record(&password), record(&recovery)) else {
+        let (Some(password_record), Some(recovery_record)) = (password_file(&password), password_file(&recovery))
+        else {
             return self.error(ErrorCode::BadFrame, "not a registration upload").await;
         };
         let new = NewAccount {
@@ -203,9 +213,7 @@ impl Link {
                     pending_until: Some(now + self.state.limits.pending_secs),
                 };
                 tracing::info!("signed up {} ({})", account.username, account.number);
-                self.kick = Some(kick);
-                self.conn = Conn::SignedIn { session, account_id, reauthed_until: None };
-                self.send(&ServerFrame::SignedIn { token: B64(token), account, copy: None }).await
+                self.enter(Done { session, account_id, token, account, copy: None, kick }).await
             }
             Ok(Created::Limit(message)) => {
                 self.conn = Conn::Anonymous;

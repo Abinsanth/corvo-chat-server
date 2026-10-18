@@ -1,12 +1,14 @@
 # corvo-chat-server
 
 The server for corvo-chat, end-to-end encrypted 1:1 chat. It stores and
-forwards ciphertext only. It gives out 10-digit numbers, holds messages
-while the other person is offline, and lets new accounts in by invite.
+forwards ciphertext only. Each account gets a username and a 10-digit
+number, joins by invite, and signs in with OPAQUE (the server never sees the
+password) from up to 3 devices.
 
 **Status:** early development. It runs at `https://chat.corvo.live`.
 
-To run your own, see [docs/deploy.md](docs/deploy.md).
+- To run your own, see [docs/deploy.md](docs/deploy.md).
+- To write a client, see [docs/protocol.md](docs/protocol.md).
 
 ## Development
 

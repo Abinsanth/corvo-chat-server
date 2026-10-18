@@ -1,11 +1,12 @@
 //! Hourly cleanup of expired pending accounts, unused devices and old
 //! rate-limit attempts.
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
+use corvo_chat_proto::frames::SignedOutReason;
 use rusqlite::Connection;
 
-use crate::{attempts, limits::Limits, sessions, state::AppState};
+use crate::{attempts, hub::Kick, limits::Limits, sessions, state::AppState};
 
 /// How long attempts are kept: the longest window is a day.
 const ATTEMPTS_KEEP_SECS: i64 = 86_400;
@@ -18,10 +19,14 @@ pub struct Cleaned {
 }
 
 /// Deletes expired pending accounts (their sessions and invite go with them),
-/// sessions idle for `device_idle_secs`, and attempts older than a day.
-pub fn run(conn: &mut Connection, now: i64, limits: &Limits) -> rusqlite::Result<Cleaned> {
+/// sessions idle for `device_idle_secs`, and attempts older than a day. The
+/// `online` sessions are in use, so they count as used now.
+pub fn run(conn: &mut Connection, now: i64, limits: &Limits, online: &HashSet<i64>) -> rusqlite::Result<Cleaned> {
     let tx = conn.transaction()?;
     let pending = tx.execute("DELETE FROM accounts WHERE pending_until IS NOT NULL AND pending_until <= ?1", [now])?;
+    for id in online {
+        sessions::touch(&tx, *id, now)?;
+    }
     let idle = sessions::idle(&tx, now - limits.device_idle_secs)?;
     for id in &idle {
         sessions::delete(&tx, *id)?;
@@ -31,14 +36,30 @@ pub fn run(conn: &mut Connection, now: i64, limits: &Limits) -> rusqlite::Result
     Ok(Cleaned { pending, sessions: idle })
 }
 
-/// Runs [`run`] every hour in the background and logs the counts.
+/// One cleanup of the live server. The hub is read under the database lock,
+/// which orders it against sign-ins, and any connection still holding a
+/// deleted session is signed out.
+pub async fn once(state: &AppState) -> rusqlite::Result<Cleaned> {
+    let (now, limits, hub) = (state.clock.now(), state.limits.clone(), state.hub.clone());
+    state
+        .db
+        .call(move |conn| {
+            let cleaned = run(conn, now, &limits, &hub.sessions())?;
+            for id in &cleaned.sessions {
+                hub.kick(*id, Kick::SignedOut(SignedOutReason::Expired));
+            }
+            Ok(cleaned)
+        })
+        .await
+}
+
+/// Runs [`once`] every hour in the background and logs the counts.
 pub fn spawn_cleanup(state: AppState) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(3600));
         loop {
             tick.tick().await;
-            let (now, limits) = (state.clock.now(), state.limits.clone());
-            match state.db.call(move |conn| run(conn, now, &limits)).await {
+            match once(&state).await {
                 Ok(c) => {
                     tracing::info!("cleanup: {} pending accounts, {} idle devices removed", c.pending, c.sessions.len())
                 }
@@ -79,7 +100,7 @@ mod tests {
         attempts::note(&conn, "sign_in", "1", now - ATTEMPTS_KEEP_SECS - 1).unwrap();
         attempts::note(&conn, "sign_in", "1", now - 10).unwrap();
 
-        let cleaned = run(&mut conn, now, &limits).unwrap();
+        let cleaned = run(&mut conn, now, &limits, &HashSet::new()).unwrap();
 
         assert_eq!(cleaned.pending, 1);
         assert_eq!(cleaned.sessions.len(), 1);

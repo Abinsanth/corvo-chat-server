@@ -70,12 +70,31 @@ in `/tmp/corvo-chat-server.service` on the server before installing:
 ExecStart=/usr/local/bin/corvo-chat-server serve --domain chat.example.com
 ```
 
-Then on the server:
+Then on the server, install them and make the **server key** once:
 ```bash
 sudo install -m 755 /tmp/corvo-chat-server /usr/local/bin/
 sudo install -m 644 /tmp/corvo-chat-server.service /etc/systemd/system/
+sudo install -d -o corvo-chat -g corvo-chat -m 700 /var/lib/corvo-chat
+sudo -u corvo-chat /usr/local/bin/corvo-chat-server keygen
 sudo systemctl daemon-reload
 sudo systemctl enable --now corvo-chat-server
+```
+`keygen` prints `opaque.key written. Back it up offline: losing it breaks
+every account.` It never overwrites an existing key, and `serve` won't start
+without one.
+
+**Back up `/var/lib/corvo-chat/opaque.key` offline right away.** Every
+account's sign-in depends on it: without it, nobody can sign in again, and
+there's no way to make it again. For example, print it as text and keep it
+in a password manager:
+```bash
+sudo cat /var/lib/corvo-chat/opaque.key | base64
+```
+Never paste it anywhere public. To put it back on a new server, before the
+first start:
+```bash
+echo '<the base64 text>' | base64 -d | sudo -u corvo-chat tee /var/lib/corvo-chat/opaque.key >/dev/null
+sudo chmod 600 /var/lib/corvo-chat/opaque.key
 ```
 
 ## 4. Checking it
@@ -110,7 +129,42 @@ Expected: `certificate: DeployedCachedCert`, with no new `DeployedNewCert`.
 Finally, `sudo reboot`. A minute later, `curl -sS https://chat.example.com/`
 from your machine should answer again, with nobody logging in.
 
-## 5. Updating
+## 5. Accounts and invites
+
+New accounts wait as **pending** for a day until someone active invites
+them. The admin commands run on the server as the service's user, while the
+service runs.
+
+- **The first account** has nobody to invite it. Sign up from a corvo-chat
+  client, which shows the new account's number, then activate it:
+  ```bash
+  sudo -u corvo-chat /usr/local/bin/corvo-chat-server activate <number>
+  ```
+  It prints `activated <username> (<number>)`.
+- **Inviting as the admin:** active users invite from their client, and the
+  admin can too:
+  ```bash
+  sudo -u corvo-chat /usr/local/bin/corvo-chat-server invite <number>
+  ```
+  It prints the 6-digit code, then who it's for and until when it works. Pass
+  the code on to that person.
+- **Device limit:** each account may have 3 devices signed in. To change it,
+  add `--max-devices` to the `ExecStart` line with a drop-in, which keeps the
+  unit file as it ships:
+  ```bash
+  sudo systemctl edit corvo-chat-server
+  ```
+  In the editor, add:
+  ```
+  [Service]
+  ExecStart=
+  ExecStart=/usr/local/bin/corvo-chat-server serve --domain chat.example.com --max-devices 5
+  ```
+  Then `sudo systemctl restart corvo-chat-server`.
+
+Clients talk to the server as [docs/protocol.md](protocol.md) describes.
+
+## 6. Updating
 
 Download and copy the new build as in step 3 (the unit file only when it
 changed), then on the server:
@@ -120,8 +174,12 @@ sudo systemctl restart corvo-chat-server
 curl -sS https://chat.example.com/
 ```
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
+- **`no opaque.key in /var/lib/corvo-chat: run "corvo-chat-server keygen"
+  first`** in the journal: the server has no key yet. On a server that has
+  never had accounts, run `keygen` as in step 3. If it had accounts, put the
+  backed-up key back instead: a new key breaks every account.
 - **`warn` lines with `certificate:`** usually mean Let's Encrypt can't reach
   the server: DNS doesn't point here yet, or port 443 is shut in one of the
   firewalls (check with `nc -vz` from step 2). The server keeps retrying on
