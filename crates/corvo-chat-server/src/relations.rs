@@ -93,19 +93,7 @@ mod tests {
     use rusqlite::Connection;
 
     fn conn() -> Connection {
-        let mut c = Connection::open_in_memory().unwrap();
-        c.pragma_update(None, "foreign_keys", true).unwrap();
-        crate::db::migrate(&mut c).unwrap();
-        for id in 1..=4 {
-            c.execute(
-                "INSERT INTO accounts (id, username, number, display_name, password_record, recovery_record,
-                   password_copy, recovery_copy, signing_key, exchange_key, key_signature, created_at)
-                 VALUES (?1, ?2, ?3, 'X', x'', x'', x'', x'', x'', x'', x'', 0)",
-                rusqlite::params![id, format!("a-000{id}"), format!("10000000{id}")],
-            )
-            .unwrap();
-        }
-        c
+        crate::testing::conn_with_accounts(4)
     }
 
     #[test]
