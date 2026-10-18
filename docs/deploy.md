@@ -252,7 +252,7 @@ out.
    ```
    Each day makes `server-YYYY-MM-DD.db` (readable only by `corvo-chat`), and
    the newest 7 are kept. Backups don't include `opaque.key`; keep that one
-   offline as in step 3. To restore one:
+   offline as in section 3. To restore one:
    ```bash
    sudo systemctl stop corvo-chat-server
    sudo -u corvo-chat cp /var/lib/corvo-chat/backups/server-YYYY-MM-DD.db /var/lib/corvo-chat/server.db
