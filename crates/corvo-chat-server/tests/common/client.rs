@@ -145,13 +145,19 @@ impl Client {
     }
 
     /// Whether the server closes the connection within 5 s with no frame
-    /// before the close.
+    /// before the close but pushed `events` and `presence`.
     pub async fn closed_quietly(&mut self) -> bool {
         let next = async {
             loop {
                 match self.ws.next().await {
                     None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return true,
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    Some(Ok(Message::Text(text))) => {
+                        let frame: ServerFrame = serde_json::from_str(&text).expect("a server frame");
+                        if !matches!(frame, ServerFrame::Events { .. } | ServerFrame::Presence { .. }) {
+                            return false;
+                        }
+                    }
                     Some(Ok(_)) => return false,
                 }
             }

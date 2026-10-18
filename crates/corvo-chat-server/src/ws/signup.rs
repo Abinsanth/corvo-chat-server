@@ -200,6 +200,7 @@ impl Link {
                         return Err(err);
                     }
                 };
+                crate::events::note_devices(c, &hub, account_id).map_err(|e| e.to_string())?;
                 let joined = hub.join(session.id, account_id, conn_id);
                 Ok(Created::Done { token: session.token, account_id, session: session.id, joined })
             })
@@ -318,10 +319,19 @@ impl Link {
 
     /// The device signs itself out: the session goes, the connection closes.
     pub(super) async fn sign_out(&mut self) -> Flow {
-        let Conn::SignedIn { session, .. } = self.conn else {
+        let Conn::SignedIn { session, account_id, .. } = self.conn else {
             return self.error(ErrorCode::NotSignedIn, "sign in first").await;
         };
-        if let Err(err) = self.state.db.call(move |c| sessions::delete(c, session)).await {
+        let hub = self.state.hub.clone();
+        let signed_out = self
+            .state
+            .db
+            .call(move |c| -> rusqlite::Result<()> {
+                sessions::delete(c, session)?;
+                crate::events::note_devices(c, &hub, account_id)
+            })
+            .await;
+        if let Err(err) = signed_out {
             return self.internal("signing out", err).await;
         }
         self.send(&ServerFrame::SignedOut { reason: SignedOutReason::ThisDevice }).await;

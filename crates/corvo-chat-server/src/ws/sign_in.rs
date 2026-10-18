@@ -254,6 +254,7 @@ impl Link {
                     Err(SessionError::Db(err)) => return Err(err),
                 };
                 attempts::note(c, "sign_in", &key, now)?;
+                crate::events::note_devices(c, &hub, account_id)?;
                 let copy = accounts::copy(c, account_id, Which::Password)?;
                 let joined = join(&hub, account_id, conn_id, &session);
                 Ok(SignIn::Done(Box::new(Done {

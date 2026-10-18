@@ -297,8 +297,9 @@ impl Link {
             F::Send { chat_id, msg_id, body, new_chat } => self.send_message(chat_id, msg_id, body, new_chat).await,
             // The gate refuses a second hello.
             F::Hello { .. } => self.error(ErrorCode::BadFrame, "not expected now").await,
-            // Chats and sync arrive in the next changes.
-            _ => self.error(ErrorCode::BadFrame, "not supported yet").await,
+            F::SetDisplayName { display_name } => self.set_display_name(display_name).await,
+            F::RenameDevice { name } => self.rename_device(name).await,
+            F::SetPin { pin } => self.set_pin(pin).await,
         }
     }
 

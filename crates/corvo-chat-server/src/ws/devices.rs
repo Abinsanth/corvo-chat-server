@@ -52,6 +52,7 @@ impl Link {
                         return Ok(None);
                     }
                     sessions::delete(c, target.id)?;
+                    crate::events::note_devices(c, &hub, account_id)?;
                     hub.kick(target.id, Kick::SignedOut(SignedOutReason::ByAnotherDevice));
                 }
                 infos(c, account_id, session).map(Some)

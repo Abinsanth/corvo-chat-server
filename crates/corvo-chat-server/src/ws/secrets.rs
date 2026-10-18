@@ -119,6 +119,7 @@ impl Link {
                         SessionError::Db(e) => e.to_string(),
                         SessionError::DeviceLimit => "device limit right after deleting every session".into(),
                     })?;
+                crate::events::note_devices(c, &hub, account_id).map_err(text)?;
                 let joined = join(&hub, account_id, conn_id, &session);
                 Ok(Some(Done {
                     session: session.id,
@@ -175,6 +176,9 @@ impl Link {
                     Which::Recovery => Vec::new(),
                 };
                 tx.commit()?;
+                if !gone.is_empty() {
+                    crate::events::note_devices(c, &hub, account_id)?;
+                }
                 for id in gone {
                     hub.kick(id, Kick::SignedOut(SignedOutReason::PasswordChanged));
                 }

@@ -16,6 +16,8 @@ pub struct Cleaned {
     pub pending: usize,
     /// Ids of the idle sessions deleted.
     pub sessions: Vec<i64>,
+    /// The accounts those sessions belonged to.
+    pub accounts: Vec<i64>,
 }
 
 /// Deletes expired pending accounts (their sessions and invite go with them),
@@ -27,13 +29,18 @@ pub fn run(conn: &mut Connection, now: i64, limits: &Limits, online: &HashSet<i6
     for id in online {
         sessions::touch(&tx, *id, now)?;
     }
-    let idle = sessions::idle(&tx, now - limits.device_idle_secs)?;
+    let before = now - limits.device_idle_secs;
+    let accounts = tx
+        .prepare("SELECT DISTINCT account_id FROM sessions WHERE last_used < ?1 ORDER BY account_id")?
+        .query_map([before], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<i64>>>()?;
+    let idle = sessions::idle(&tx, before)?;
     for id in &idle {
         sessions::delete(&tx, *id)?;
     }
     attempts::prune(&tx, now - ATTEMPTS_KEEP_SECS)?;
     tx.commit()?;
-    Ok(Cleaned { pending, sessions: idle })
+    Ok(Cleaned { pending, sessions: idle, accounts })
 }
 
 /// One cleanup of the live server. The hub is read under the database lock,
@@ -47,6 +54,9 @@ pub async fn once(state: &AppState) -> rusqlite::Result<Cleaned> {
             let cleaned = run(conn, now, &limits, &hub.sessions())?;
             for id in &cleaned.sessions {
                 hub.kick(*id, Kick::SignedOut(SignedOutReason::Expired));
+            }
+            for account in &cleaned.accounts {
+                crate::events::note_devices(conn, &hub, *account)?;
             }
             Ok(cleaned)
         })

@@ -1,12 +1,23 @@
-//! What someone does about another person: accept, reject, block, unblock,
-//! remove. Each changes only their own row, except an accept, which the
-//! other side asked for.
+//! What someone does about another person (accept, reject, block, unblock,
+//! remove; each changes only their own row, except an accept, which the
+//! other side asked for), and about their own profile: display name,
+//! device name, pinned keys.
 
-use corvo_chat_proto::{Number, chat::Relation, frames::ErrorCode};
+use corvo_chat_proto::{
+    Number,
+    chat::{Pin, Relation},
+    frames::ErrorCode,
+    names::{check_device_name, check_display_name},
+};
 use rusqlite::Connection;
 
 use super::{Conn, Flow, Link, chat::Touched};
-use crate::{accounts, chats, events::Ev, hub::Hub, relations};
+use crate::{
+    accounts, chats,
+    events::{self, Ev},
+    hub::Hub,
+    pins, relations, sessions,
+};
 
 /// The five changes, as their frames ask.
 #[derive(Clone, Copy)]
@@ -165,4 +176,88 @@ pub(super) fn befriend_on_activation(
     touched.poke(hub);
     announce_pair(hub, me, (inviter, inviter_row.number), true);
     Ok(())
+}
+
+impl Link {
+    /// A new display name: this account's devices get `profile`, and
+    /// everyone it shows its name to gets `person`.
+    pub(super) async fn set_display_name(&mut self, display_name: String) -> Flow {
+        let Conn::SignedIn { account_id: me, .. } = self.conn else {
+            return self.error(ErrorCode::NotSignedIn, "sign in first").await;
+        };
+        let name = match check_display_name(&display_name) {
+            Ok(name) => name,
+            Err(err) => return self.error(ErrorCode::BadDisplayName, &err.to_string()).await,
+        };
+        let hub = self.state.hub.clone();
+        let done = self
+            .state
+            .db
+            .call(move |c| -> rusqlite::Result<()> {
+                let mut touched = Touched::default();
+                let tx = c.transaction()?;
+                accounts::set_display_name(&tx, me, &name)?;
+                touched.append(&tx, me, &Ev::Profile)?;
+                for (other, relation) in relations::rows(&tx, me)? {
+                    if matches!(relation, Relation::Asked | Relation::Contact) {
+                        touched.append(&tx, other, &Ev::Person { other: me })?;
+                    }
+                }
+                tx.commit()?;
+                touched.poke(&hub);
+                Ok(())
+            })
+            .await;
+        match done {
+            Ok(()) => Flow::Stay,
+            Err(err) => self.internal("changing the display name", err).await,
+        }
+    }
+
+    /// Renames this device; every device of the account gets `devices`.
+    pub(super) async fn rename_device(&mut self, name: String) -> Flow {
+        let Conn::SignedIn { session, account_id, .. } = self.conn else {
+            return self.error(ErrorCode::NotSignedIn, "sign in first").await;
+        };
+        let name = match check_device_name(&name) {
+            Ok(name) => name,
+            Err(err) => return self.error(ErrorCode::BadDevice, &err.to_string()).await,
+        };
+        let hub = self.state.hub.clone();
+        let done = self
+            .state
+            .db
+            .call(move |c| -> rusqlite::Result<()> {
+                sessions::rename(c, session, &name)?;
+                events::note_devices(c, &hub, account_id)
+            })
+            .await;
+        match done {
+            Ok(()) => Flow::Stay,
+            Err(err) => self.internal("renaming a device", err).await,
+        }
+    }
+
+    /// Stores or removes a pinned key; every device of the account gets `pin`.
+    pub(super) async fn set_pin(&mut self, pin: Pin) -> Flow {
+        let Conn::SignedIn { account_id: me, .. } = self.conn else {
+            return self.error(ErrorCode::NotSignedIn, "sign in first").await;
+        };
+        let hub = self.state.hub.clone();
+        let done = self
+            .state
+            .db
+            .call(move |c| -> rusqlite::Result<()> {
+                let mut touched = Touched::default();
+                pins::set(c, me, pin.number, pin.pin.as_ref().map(|blob| blob.0.as_slice()))?;
+                touched.append(c, me, &Ev::Pin { number: pin.number })?;
+                touched.poke(&hub);
+                Ok(())
+            })
+            .await;
+        match done {
+            Ok(()) => Flow::Stay,
+            Err(err) => self.internal("setting a pin", err).await,
+        }
+    }
 }
