@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use crate::chat::{Event, Message, NewChat, Pin, Snapshot};
 use crate::keys::PublicKeys;
 use crate::opaque::{CredFinal, CredRequest, CredResponse, RegRequest, RegResponse, RegUpload};
-use crate::{B64, Blob, Number};
+use crate::{B64, Blob, Body, Number};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,6 +85,9 @@ pub enum ErrorCode {
     TooManyInvites,
     NotAllowed,
     Internal,
+    NumberUnknown,
+    ChatUnknown,
+    ChatExists,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -135,6 +139,40 @@ pub enum ClientFrame {
     SignOutDevice { id: B64<16> },
     /// Signed in.
     SignOut,
+    /// Active. `None` on a new device: it gets a snapshot.
+    Sync { cursor: Option<i64> },
+    /// Active.
+    History { chat_id: B64<16>, before: i64, limit: u32 },
+    /// Active.
+    Lookup { number: Number },
+    /// Active. `new_chat` only with a chat's first message.
+    Send {
+        chat_id: B64<16>,
+        msg_id: B64<16>,
+        body: Body,
+        #[serde(default)]
+        new_chat: Option<NewChat>,
+    },
+    /// Active.
+    Received { chat_id: B64<16>, through: i64 },
+    /// Active.
+    Read { chat_id: B64<16>, through: i64 },
+    /// Active.
+    Accept { number: Number },
+    /// Active.
+    Reject { number: Number },
+    /// Active.
+    Block { number: Number },
+    /// Active.
+    Unblock { number: Number },
+    /// Active.
+    Remove { number: Number, clear_history: bool },
+    /// Active.
+    SetDisplayName { display_name: String },
+    /// Active: renames this device.
+    RenameDevice { name: String },
+    /// Active.
+    SetPin { pin: Pin },
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -189,5 +227,43 @@ pub enum ServerFrame {
         message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         until: Option<i64>,
+    },
+    Snapshot {
+        snapshot: Snapshot,
+    },
+    /// `cursor` is the last seq this frame covers, even when its last events
+    /// weren't shown.
+    Events {
+        events: Vec<Event>,
+        cursor: i64,
+    },
+    Synced {
+        cursor: i64,
+    },
+    /// Oldest first; `complete` when nothing older is visible.
+    History {
+        chat_id: B64<16>,
+        messages: Vec<Message>,
+        complete: bool,
+    },
+    Found {
+        number: Number,
+        public_keys: PublicKeys,
+    },
+    Sent {
+        chat_id: B64<16>,
+        msg_id: B64<16>,
+        seq: i64,
+        sent_at: i64,
+    },
+    NotSent {
+        chat_id: B64<16>,
+        msg_id: B64<16>,
+        code: ErrorCode,
+        message: String,
+    },
+    Presence {
+        number: Number,
+        online: bool,
     },
 }

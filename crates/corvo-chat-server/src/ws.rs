@@ -260,6 +260,8 @@ impl Link {
             F::SignOut => self.sign_out().await,
             // The gate refuses a second hello.
             F::Hello { .. } => self.error(ErrorCode::BadFrame, "not expected now").await,
+            // Chats and sync arrive in the next changes.
+            _ => self.error(ErrorCode::BadFrame, "not supported yet").await,
         }
     }
 
