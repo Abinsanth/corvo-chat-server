@@ -1,7 +1,7 @@
 mod common;
 
 use common::{
-    chat::{contacts, first_message},
+    chat::{contacts, first_message, random_id},
     client::{Client, TestServer, assert_error, start_server},
     person::{Outcome, Person, device, login, reauth, resume},
 };
@@ -184,4 +184,21 @@ async fn a_login_or_recovery_in_flight_across_a_delete_fails() {
         count(&server, "SELECT length(password_record) + length(password_copy) FROM accounts WHERE id = ?1", id).await,
         0
     );
+}
+
+#[tokio::test]
+async fn resend_after_the_other_side_deleted_gets_the_stored_copy() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, mut b) = contacts(&server).await;
+    let chat_id = first_message(&mut b, &rahul, abin.number).await;
+    let msg_id = random_id();
+    let first = b.send_with_id(&chat_id, &msg_id, b"x".to_vec(), None).await;
+    assert!(matches!(first, ServerFrame::Sent { seq: 2, .. }), "{first:?}");
+    delete(&mut a, &abin).await;
+    b.drain().await;
+    assert_eq!(b.send_with_id(&chat_id, &msg_id, b"x".to_vec(), None).await, first);
+    match b.send_body(&chat_id, b"y".to_vec(), None).await {
+        ServerFrame::NotSent { code, .. } => assert_eq!(code, ErrorCode::AccountDeleted),
+        other => panic!("expected not_sent account_deleted, got {other:?}"),
+    }
 }

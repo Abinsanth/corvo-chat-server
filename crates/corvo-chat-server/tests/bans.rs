@@ -92,6 +92,22 @@ async fn sweep_leaves_a_healthy_device_alone() {
 }
 
 #[tokio::test]
+async fn resend_after_a_ban_gets_the_stored_copy() {
+    let server = start_server().await;
+    let (abin, mut a, rahul, _b) = contacts(&server).await;
+    let chat_id = first_message(&mut a, &abin, rahul.number).await;
+    let msg_id = random_id();
+    let first = a.send_with_id(&chat_id, &msg_id, b"x".to_vec(), None).await;
+    assert!(matches!(first, ServerFrame::Sent { seq: 2, .. }), "{first:?}");
+    ban(&server, &rahul).await;
+    assert_eq!(a.send_with_id(&chat_id, &msg_id, b"x".to_vec(), None).await, first);
+    match a.send_body(&chat_id, b"y".to_vec(), None).await {
+        ServerFrame::NotSent { code, .. } => assert_eq!(code, ErrorCode::Banned),
+        other => panic!("expected not_sent banned, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn banned_devices_next_frame_signs_it_out() {
     let server = start_server().await;
     let (rahul, mut b) = Person::active(&server, "rahul").await;
