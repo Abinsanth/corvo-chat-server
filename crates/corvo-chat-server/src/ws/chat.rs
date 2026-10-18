@@ -14,7 +14,7 @@ use crate::{
     accounts, attempts,
     chats::{self, Added, ChatError},
     events::{self, Ev},
-    hub::Push,
+    hub::{Hub, Push},
     limits::Limits,
     relations,
 };
@@ -38,13 +38,22 @@ enum Looked {
 
 /// Accounts whose logs got events, to poke once the writes are in.
 #[derive(Default)]
-struct Touched(Vec<i64>);
+pub(super) struct Touched(Vec<i64>);
 
 impl Touched {
-    fn append(&mut self, c: &Connection, account: i64, ev: &Ev) -> rusqlite::Result<()> {
+    pub(super) fn append(&mut self, c: &Connection, account: i64, ev: &Ev) -> rusqlite::Result<()> {
         events::append(c, account, ev)?;
         self.0.push(account);
         Ok(())
+    }
+
+    /// Pokes every account that got an event, once each.
+    pub(super) fn poke(mut self, hub: &Hub) {
+        self.0.sort_unstable();
+        self.0.dedup();
+        for account in self.0 {
+            hub.push(account, Push::Events);
+        }
     }
 }
 
@@ -215,11 +224,7 @@ impl Link {
                 let tx = c.transaction()?;
                 let stored = store(&tx, account_id, &out, now, &limits, &mut touched)?;
                 tx.commit()?;
-                touched.0.sort_unstable();
-                touched.0.dedup();
-                for account in touched.0 {
-                    hub.push(account, Push::Events);
-                }
+                touched.poke(&hub);
                 Ok(stored)
             })
             .await;
@@ -271,9 +276,7 @@ impl Link {
                     touched.append(&tx, other, &Ev::Marks { chat })?;
                 }
                 tx.commit()?;
-                for account in touched.0 {
-                    hub.push(account, Push::Events);
-                }
+                touched.poke(&hub);
                 Ok(true)
             })
             .await;

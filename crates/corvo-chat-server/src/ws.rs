@@ -31,6 +31,7 @@ use crate::{
 
 mod chat;
 mod devices;
+mod people;
 mod secrets;
 mod sign_in;
 mod signup;
@@ -283,6 +284,11 @@ impl Link {
             F::SignOut => self.sign_out().await,
             F::Sync { cursor } => self.sync(cursor).await,
             F::Lookup { number } => self.lookup(number).await,
+            F::Accept { number } => self.relate(number, people::Change::Accept).await,
+            F::Reject { number } => self.relate(number, people::Change::Reject).await,
+            F::Block { number } => self.relate(number, people::Change::Block).await,
+            F::Unblock { number } => self.relate(number, people::Change::Unblock).await,
+            F::Remove { number, clear_history } => self.relate(number, people::Change::Remove { clear_history }).await,
             F::Received { chat_id, through } => self.ack(chat_id, through, false).await,
             F::Read { chat_id, through } => self.ack(chat_id, through, true).await,
             F::History { chat_id, before, limit } => self.history(chat_id, before, limit).await,

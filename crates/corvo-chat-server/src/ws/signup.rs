@@ -9,7 +9,7 @@ use corvo_chat_proto::{
 use data_encoding::BASE64;
 use opaque_ke::{RegistrationRequest, RegistrationUpload, ServerRegistration};
 
-use super::{Conn, Flow, Link, sign_in::Done};
+use super::{Conn, Flow, Link, people::befriend_on_activation, sign_in::Done};
 use crate::{
     accounts::{self, CreateError, NewAccount},
     attempts,
@@ -234,7 +234,7 @@ impl Link {
         let Conn::SignedIn { account_id, .. } = self.conn else {
             return self.error(ErrorCode::NotSignedIn, "sign in first").await;
         };
-        let (now, limits) = (self.state.clock.now(), self.state.limits.clone());
+        let (now, limits, hub) = (self.state.clock.now(), self.state.limits.clone(), self.state.hub.clone());
         let done = self
             .state
             .db
@@ -246,6 +246,9 @@ impl Link {
                 match invites::redeem(c, account_id, &code, now, limits.code_tries) {
                     Ok(inviter) => {
                         accounts::activate(c, account_id, inviter, now)?;
+                        if let Some(inviter) = inviter {
+                            befriend_on_activation(c, &hub, (account_id, row.number), inviter, now)?;
+                        }
                         Ok(Ok(Some(Account { pending_until: None, ..row.to_frame() })))
                     }
                     Err(InviteError::Wrong) => Ok(Err(ErrorCode::CodeWrong)),
